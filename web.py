@@ -4,6 +4,7 @@ Two server-rendered surfaces on one FastAPI app (templates/ holds the HTML):
 
     GET  /                customer-facing free-text intake form
     POST /                runs the pipeline, renders the analysis result
+                          (per-IP token-bucket rate limit; 429 + Retry-After)
     GET  /admin           company-facing: all processed requests, newest first,
                           escalated rows flagged
     GET  /admin/{id}      full audit detail for one request: every step, values,
@@ -33,10 +34,12 @@ Usage:
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -119,6 +122,48 @@ class AuditStore:
 
     def count(self) -> int:
         return len(self._read_all())
+
+
+# ----------------------------------------------------------------- rate limit
+
+class RateLimiter:
+    """Per-key token bucket: `burst` requests immediately, refilled at
+    `per_minute`/60 tokens a second. In-memory and per-process — resets on
+    restart, not shared across replicas; swap for a shared store alongside
+    the audit store when the deployment grows past one process.
+    """
+
+    MAX_KEYS = 4096  # prune idle buckets past this; bounds memory under churn
+
+    def __init__(self, burst: int, per_minute: float):
+        self.burst = float(burst)
+        self.refill_per_sec = per_minute / 60.0
+        self._buckets: "dict[str, tuple[float, float]]" = {}  # key -> (tokens, stamp)
+        self._lock = threading.Lock()
+
+    def try_acquire(self, key: str) -> float:
+        """0.0 when a token was taken; otherwise seconds until one refills."""
+        now = time.monotonic()
+        with self._lock:
+            tokens, stamp = self._buckets.get(key, (self.burst, now))
+            tokens = min(self.burst, tokens + (now - stamp) * self.refill_per_sec)
+            if tokens >= 1.0:
+                self._buckets[key] = (tokens - 1.0, now)
+                if len(self._buckets) > self.MAX_KEYS:
+                    self._prune(now)
+                return 0.0
+            self._buckets[key] = (tokens, now)
+            return (1.0 - tokens) / self.refill_per_sec
+
+    def _prune(self, now: float) -> None:
+        """Drop buckets that have refilled to full — indistinguishable from
+        never having been seen. Called with the lock held."""
+        full = [
+            key for key, (tokens, stamp) in self._buckets.items()
+            if tokens + (now - stamp) * self.refill_per_sec >= self.burst
+        ]
+        for key in full:
+            del self._buckets[key]
 
 
 # Result fields the web layer knows by name. Anything else the pipeline adds
@@ -285,6 +330,13 @@ except ConfigError as exc:
 AGENT = IntakeAgent(SETTINGS)  # constructs the SDK client; no network call yet
 STORE = AuditStore(Path(os.environ.get("INTAKE_AUDIT_LOG", DEFAULT_AUDIT_LOG)))
 
+# POST / triggers a model pipeline run, so it is the endpoint worth guarding.
+# Defaults are generous for a human, tight for a script; env-tunable for ops.
+RATE_LIMITER = RateLimiter(
+    burst=int(os.environ.get("INTAKE_RATE_BURST", "5")),
+    per_minute=float(os.environ.get("INTAKE_RATE_PER_MINUTE", "6")),
+)
+
 app = FastAPI(title="Restoration Intake — Web", docs_url=None, redoc_url=None)
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
@@ -368,6 +420,19 @@ def intake_form(request: Request) -> HTMLResponse:
 
 @app.post("/", response_class=HTMLResponse)
 def intake_submit(request: Request, text: str = Form("")) -> HTMLResponse:
+    client_ip = request.client.host if request.client else "unknown"
+    wait = RATE_LIMITER.try_acquire(client_ip)
+    if wait > 0:
+        retry_after = max(1, math.ceil(wait))
+        return templates.TemplateResponse(
+            request, "index.html",
+            {"active": "intake", "result": None,
+             "error": "You're submitting faster than we can take requests in. "
+                      f"Please wait about {retry_after} seconds and try again.",
+             "text": text},
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+        )
     try:
         analysis = AGENT.handle(text, channel="web")
     except ValidationError as exc:
