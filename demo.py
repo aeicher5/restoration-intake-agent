@@ -15,11 +15,11 @@ The five cases, chosen to light up every path in the pipeline:
     3. ambiguous low-signal       low-confidence read -> Opus reread -> human
                                   review (the full escalation chain)
     4. too-short garbage          rejected by deterministic validation before
-                                  any model call; shown in terminal output only
-                                  (rejections aren't persisted — documented gap)
-    5. active fire                classifies cleanly at high confidence; the
-                                  missing life-safety urgency tier is a
-                                  documented backlog item (evals/README.md)
+                                  any model call; persisted with status
+                                  "rejected" so /admin shows rejects too
+    5. active fire                classifies at high confidence AND trips the
+                                  deterministic life-safety screen: flagged,
+                                  forced human review, reply opens with 911
 
 Append-only: running the demo twice adds five more rows, same as real traffic.
 """
@@ -67,9 +67,8 @@ def main() -> int:
         try:
             analysis = AGENT.handle(text, channel=channel)
         except ValidationError as exc:
+            STORE.append(make_record(exc.to_dict()))
             print(f"  rejected      {exc.request_id}  ({label}): {exc}")
-            print("                not persisted — rejections don't reach the "
-                  "audit store (documented gap)")
             continue
         record = make_record(analysis.to_dict())
         STORE.append(record)

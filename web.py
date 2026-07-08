@@ -438,8 +438,9 @@ def intake_submit(request: Request, text: str = Form("")) -> HTMLResponse:
         analysis = AGENT.handle(text, channel="web")
     except ValidationError as exc:
         # Bad input, rejected deterministically before any model call. The
-        # partial trail is discarded inside handle(), so rejections don't
-        # appear in /admin — gap noted in HANDOFF-A.md.
+        # finished trail rides on the exception (received → validated →
+        # rejected), so rejects reach /admin like any other request.
+        STORE.append(make_record(exc.to_dict()))
         return templates.TemplateResponse(
             request, "index.html",
             {"active": "intake", "result": None, "error": str(exc),
