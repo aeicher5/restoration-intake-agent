@@ -39,6 +39,12 @@ damage, anything. Our intake system reads it immediately and routes it to the ri
     </dd>
     <dt>assessment</dt><dd>{{ result.notes }}</dd>
   </dl>
+  {% if result.extras and result.extras.customer_reply %}
+  <div class="reply-block">
+    <span class="stat-label">Our reply</span>
+    <p>{{ result.extras.customer_reply }}</p>
+  </div>
+  {% endif %}
   <p class="muted" style="margin-bottom:0"><small>Keep your reference number handy —
   it identifies this request from here on.</small></p>
 </div>

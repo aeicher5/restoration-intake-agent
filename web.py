@@ -27,6 +27,7 @@ Usage:
 import json
 import logging
 import os
+import re
 import sys
 import threading
 from datetime import datetime
@@ -107,17 +108,26 @@ class AuditStore:
         return len(self._read_all())
 
 
+# Result fields the web layer knows by name. Anything else the pipeline adds
+# to Analysis.to_dict() (customer_reply, critic verdicts, ...) rides along in
+# record["extras"] and renders generically — new fields need no changes here.
+KNOWN_RESULT_FIELDS = frozenset({
+    "request_id", "request_type", "confidence", "escalate_to_human", "notes", "audit",
+})
+
+
 def make_record(analysis_dict: Mapping[str, Any]) -> dict[str, Any]:
     """Flatten an Analysis.to_dict() into the stored record shape.
 
     Summary fields the admin table needs live at the top level; the full audit
-    trail rides along for the detail view. Metadata comes from the trail's
-    'received' step defensively — if the pipeline's steps evolve, the record
-    degrades to blanks instead of crashing the web layer.
+    trail rides along for the detail view; unknown result fields are preserved
+    under 'extras'. Metadata comes from the trail's 'received' step
+    defensively — if the pipeline's steps evolve, the record degrades to
+    blanks instead of crashing the web layer.
     """
     received = next((s for s in analysis_dict.get("audit", []) if s.get("step") == "received"), {})
     request_meta = received.get("request", {})
-    return {
+    record = {
         "request_id": analysis_dict.get("request_id", ""),
         "received_at": request_meta.get("received_at", ""),
         "channel": request_meta.get("channel", ""),
@@ -126,8 +136,27 @@ def make_record(analysis_dict: Mapping[str, Any]) -> dict[str, Any]:
         "confidence": analysis_dict.get("confidence", 0.0),
         "escalate_to_human": analysis_dict.get("escalate_to_human", False),
         "notes": analysis_dict.get("notes", ""),
-        "audit": analysis_dict.get("audit", []),
     }
+    extras = {k: v for k, v in analysis_dict.items() if k not in KNOWN_RESULT_FIELDS}
+    if extras:
+        record["extras"] = extras
+    record["audit"] = analysis_dict.get("audit", [])
+    return record
+
+
+# Steps whose names look safety-related get a visual flag in the detail view:
+# a neutral marker when the screen ran clean, a loud one when it tripped
+# (any truthy trigger-ish value among the step's recorded fields).
+SAFETY_STEP_RE = re.compile(r"hazard|life[_-]?safety|urgen(t|cy)|emergency|911", re.IGNORECASE)
+SAFETY_TRIGGER_KEYS = ("triggered", "matched_terms", "matched", "flagged", "detected", "indicators")
+
+
+def step_safety_flag(name: str, recorded: Mapping[str, Any]) -> "str | None":
+    """None for ordinary steps; 'clear' / 'tripped' for safety-screen steps."""
+    if not SAFETY_STEP_RE.search(name):
+        return None
+    tripped = any(recorded.get(key) for key in SAFETY_TRIGGER_KEYS)
+    return "tripped" if tripped else "clear"
 
 
 def iter_usage(node: Any) -> "list[tuple[str | None, int, int]]":
@@ -236,14 +265,14 @@ def _pretty_json(value: Any) -> str:
 
 
 def _format_usd(value: Any) -> str:
-    """Auto-compact dollars: $0 / $0.0042 (sub-cent) / $1.27."""
+    """Auto-compact dollars: $0 / $0.0142 (four decimals under $1) / $1.27."""
     try:
         amount = float(value)
     except (TypeError, ValueError):
         return str(value)
     if amount == 0:
         return "$0"
-    if amount < 0.01:
+    if amount < 1:
         return f"${amount:.4f}"
     return f"${amount:.2f}"
 
@@ -360,14 +389,16 @@ def admin_detail(request: Request, request_id: str) -> HTMLResponse:
         )
     # Key must not collide with a dict method name (e.g. "values"): Jinja's
     # attribute lookup finds the method before the item and rendering breaks.
-    steps = [
-        {
-            "name": step.get("step", "?"),
+    steps = []
+    for step in record.get("audit", []):
+        name = step.get("step", "?")
+        recorded = {k: v for k, v in step.items() if k not in ("step", "at")}
+        steps.append({
+            "name": name,
             "at": step.get("at", ""),
-            "recorded": {k: v for k, v in step.items() if k not in ("step", "at")},
-        }
-        for step in record.get("audit", [])
-    ]
+            "recorded": recorded,
+            "safety": step_safety_flag(name, recorded),
+        })
     return templates.TemplateResponse(
         request, "detail.html",
         {"active": "admin", "record": record, "request_id": request_id,

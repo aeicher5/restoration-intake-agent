@@ -26,6 +26,14 @@
     {% if path %}<dt>model path</dt><dd>{{ path }}</dd>{% endif %}
     <dt>dispatcher note</dt><dd>{{ record.notes }}</dd>
     <dt>customer text</dt><dd>{{ record.raw_text }}</dd>
+    {% if record.extras and record.extras.customer_reply %}
+    <dt>customer reply</dt><dd class="reply">{{ record.extras.customer_reply }}</dd>
+    {% endif %}
+    {# Any other result fields future pipeline stages add render here as-is. #}
+    {% for key, value in (record.extras | default({})) | dictsort if key != 'customer_reply' %}
+    <dt>{{ key.replace('_', ' ') }}</dt>
+    <dd>{% if value is string %}{{ value }}{% else %}{{ value | pretty }}{% endif %}</dd>
+    {% endfor %}
   </dl>
 </div>
 
@@ -33,9 +41,14 @@
 <p class="sub">Every pipeline step in order, with the exact values recorded at that step —
 including model attempts, token usage, errors, and the escalation decision.</p>
 {% for step in steps %}
-<div class="step">
+<div class="step{% if step.safety %} safety-{{ step.safety }}{% endif %}">
   <div class="step-head">
     <h3>{{ loop.index }}. {{ step.name }}</h3>
+    {% if step.safety == 'tripped' %}
+    <span class="badge danger">safety flag</span>
+    {% elif step.safety == 'clear' %}
+    <span class="badge auto">screen clear</span>
+    {% endif %}
     <span class="at">{{ step.at | ts }}</span>
   </div>
   <pre>{{ step.recorded | pretty }}</pre>
