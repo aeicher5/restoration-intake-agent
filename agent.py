@@ -34,6 +34,7 @@ Usage:
     python3 agent.py --serve             # web UI on http://localhost:3000, JSON API on :8000
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -43,7 +44,7 @@ import sys
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -199,6 +200,7 @@ class Settings:
             "escalation_model": self.escalation_model,
             "confidence_threshold": self.confidence_threshold,
             "max_retries": self.max_retries,
+            "prompt_config": PROMPT_CONFIG.summary(),
         }
 
 
@@ -471,6 +473,61 @@ REPLY_CRITIC_SCHEMA = {
 }
 
 
+# ------------------------------------------- versioned prompt/config surface
+
+@dataclass(frozen=True)
+class PromptConfig:
+    """The promotion artifact: every prompt and threshold the pipeline's
+    behavior depends on, under one explicit version string.
+
+    This is the surface the CI promotion gate keys on — change anything here
+    (or the literals it aggregates) and the eval suite must pass before the
+    change promotes. The version says what humans intended; `fingerprint()`
+    says what the content actually is, so the audit trail can prove which
+    exact prompt/threshold set classified a given request even if someone
+    edits a prompt without bumping the version.
+
+    `confidence_threshold` is the versioned *default*; Settings may override
+    it at runtime via INTAKE_CONFIDENCE_THRESHOLD (the audit trail records
+    the effective value on every request either way).
+    """
+
+    version: str
+    classification_system_prompt: str
+    responder_system_prompt: str
+    reply_critic_system_prompt: str
+    confidence_threshold: float
+
+    def fingerprint(self) -> str:
+        """Stable 12-hex-char content hash of the whole surface."""
+        payload = json.dumps(asdict(self), sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+    def summary(self) -> dict[str, Any]:
+        """Loggable view (reaches /health): version + fingerprint + thresholds,
+        never the prompt text itself."""
+        return {
+            "version": self.version,
+            "fingerprint": self.fingerprint(),
+            "confidence_threshold": self.confidence_threshold,
+        }
+
+
+# Version history — bump on ANY change to a prompt or threshold in this
+# surface (the CI promotion gate runs the eval suite on every such change):
+#   1.0.0  original one-hour build: classification prompt, global 0.70 threshold
+#   1.1.0  post-nuclear-regression hardening + product pass: biohazard bullet
+#          names chemical/radioactive/nuclear/asbestos explicitly; responder
+#          and reply-critic prompts added behind the review gate
+PROMPT_CONFIG = PromptConfig(
+    version="1.1.0",
+    classification_system_prompt=CLASSIFICATION_SYSTEM_PROMPT,
+    responder_system_prompt=RESPONDER_SYSTEM_PROMPT,
+    reply_critic_system_prompt=REPLY_CRITIC_SYSTEM_PROMPT,
+    confidence_threshold=DEFAULT_CONFIDENCE_THRESHOLD,
+)
+
+
 # ------------------------------------------------------------------------- pipeline
 
 class IntakeAgent:
@@ -541,6 +598,10 @@ class IntakeAgent:
             "classified",
             request_type=analysis.request_type.value,
             confidence=analysis.confidence,
+            # Which exact prompt/threshold artifact made this read — on every
+            # classified step, deterministic and LLM paths alike.
+            prompt_config_version=PROMPT_CONFIG.version,
+            prompt_config_fingerprint=PROMPT_CONFIG.fingerprint(),
             **classify_detail,
         )
 
@@ -667,7 +728,7 @@ class IntakeAgent:
         response, retries_used = self._create_with_retry(
             model=model,
             max_tokens=512,
-            system=CLASSIFICATION_SYSTEM_PROMPT,
+            system=PROMPT_CONFIG.classification_system_prompt,
             messages=[{"role": "user", "content": request.raw_text}],
             output_config={"format": {"type": "json_schema", "schema": CLASSIFICATION_SCHEMA}},
         )
@@ -845,7 +906,7 @@ class IntakeAgent:
         response, retries_used = self._create_with_retry(
             model=self.settings.primary_model,
             max_tokens=300,
-            system=RESPONDER_SYSTEM_PROMPT,
+            system=PROMPT_CONFIG.responder_system_prompt,
             messages=[{"role": "user", "content": json.dumps(directives, ensure_ascii=False)}],
         )
         if response.stop_reason == "refusal":
@@ -888,7 +949,7 @@ class IntakeAgent:
         response, retries_used = self._create_with_retry(
             model=self.settings.primary_model,
             max_tokens=300,
-            system=REPLY_CRITIC_SYSTEM_PROMPT,
+            system=PROMPT_CONFIG.reply_critic_system_prompt,
             messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
             output_config={"format": {"type": "json_schema", "schema": REPLY_CRITIC_SCHEMA}},
         )
@@ -1203,6 +1264,28 @@ def selftest() -> int:
         except ConfigError:
             pass
 
+    # versioned prompt/config surface (the promotion artifact): explicit
+    # version, content fingerprint, and the public module-level names staying
+    # exactly aliased to it — backward compatibility is load-bearing (web.py,
+    # the eval runners, and this selftest all consume the module-level names).
+    assert re.fullmatch(r"\d+\.\d+\.\d+", PROMPT_CONFIG.version), PROMPT_CONFIG.version
+    assert PROMPT_CONFIG.classification_system_prompt == CLASSIFICATION_SYSTEM_PROMPT
+    assert PROMPT_CONFIG.responder_system_prompt == RESPONDER_SYSTEM_PROMPT
+    assert PROMPT_CONFIG.reply_critic_system_prompt == REPLY_CRITIC_SYSTEM_PROMPT
+    assert PROMPT_CONFIG.confidence_threshold == DEFAULT_CONFIDENCE_THRESHOLD
+    assert settings.confidence_threshold == PROMPT_CONFIG.confidence_threshold, \
+        "default Settings must inherit the versioned threshold"
+    fingerprint = PROMPT_CONFIG.fingerprint()
+    assert re.fullmatch(r"[0-9a-f]{12}", fingerprint), fingerprint
+    assert fingerprint == PROMPT_CONFIG.fingerprint(), "fingerprint must be deterministic"
+    assert replace(PROMPT_CONFIG, confidence_threshold=0.71).fingerprint() != fingerprint, \
+        "fingerprint must change when the surface's content changes"
+    assert replace(PROMPT_CONFIG, version="9.9.9").fingerprint() != fingerprint, \
+        "fingerprint covers the version string too"
+    assert summary["prompt_config"] == PROMPT_CONFIG.summary(), summary
+    assert PROMPT_CONFIG.classification_system_prompt not in json.dumps(summary), \
+        "summaries carry version + fingerprint, never prompt text"
+
     # normalization
     assert normalize_text("  water \n\n in   basement ") == "water in basement"
 
@@ -1317,6 +1400,8 @@ def selftest() -> int:
     classified_step = next(s for s in analysis.audit if s["step"] == "classified")
     assert classified_step["model_used"] == settings.primary_model, classified_step
     assert classified_step["classifier"] == "llm", classified_step
+    assert classified_step["prompt_config_version"] == PROMPT_CONFIG.version, classified_step
+    assert classified_step["prompt_config_fingerprint"] == PROMPT_CONFIG.fingerprint(), classified_step
     hazard_step = next(s for s in analysis.audit if s["step"] == "hazard_screen")
     assert hazard_step["triggered"] is False and hazard_step["matched_terms"] == [], hazard_step
     assert analysis.to_dict()["status"] == "analyzed"
@@ -1340,6 +1425,9 @@ def selftest() -> int:
     assert hazard_step["triggered"] is True and hazard_step["matched_terms"] == ["nuclear"], hazard_step
     classified_step = next(s for s in analysis.audit if s["step"] == "classified")
     assert classified_step["classifier"] == "hazard_term_screen", classified_step
+    assert classified_step["prompt_config_version"] == PROMPT_CONFIG.version, \
+        "every classified step carries the config version — deterministic paths too"
+    assert classified_step["prompt_config_fingerprint"] == PROMPT_CONFIG.fingerprint(), classified_step
     finalized_step = next(s for s in analysis.audit if s["step"] == "finalized")
     assert finalized_step["escalate_to_human"] is True, finalized_step
     assert analysis.customer_reply is None, "hazard path must make zero LLM calls, so no draft"
