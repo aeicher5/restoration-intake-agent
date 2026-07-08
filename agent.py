@@ -98,11 +98,22 @@ class ValidationError(RuntimeError):
     Distinct from the literal `assert`s in the pipeline: ValidationError means
     bad *input* (reject the request); a failed assert means a *bug* or a
     malformed model reading crossing the code<->LLM seam.
+
+    Rejections are persistable, not vanished: `audit` carries the finished
+    trail (received -> validated[status=rejected] -> rejected) and `to_dict()`
+    returns a store-ready record with status "rejected" — the rejected-request
+    counterpart of Analysis.to_dict().
     """
 
-    def __init__(self, message: str, request_id: "str | None" = None):
+    def __init__(self, message: str, request_id: "str | None" = None,
+                 audit: "list[dict[str, Any]] | None" = None):
         super().__init__(message)
         self.request_id = request_id
+        self.audit: list[dict[str, Any]] = audit if audit is not None else []
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"request_id": self.request_id, "status": "rejected",
+                "error": str(self), "audit": self.audit}
 
 
 class ClassificationError(RuntimeError):
@@ -231,6 +242,14 @@ class Analysis:
 
     `audit` is the stage-3 data layer: a JSON-able record of the values at each
     pipeline step, appended as the request moves through.
+
+    `life_safety` is set by the deterministic life-safety screen (never by the
+    LLM); True always implies escalate_to_human=True.
+
+    `customer_reply` is the reviewed customer-facing reply text; None when the
+    reply stage was skipped (deterministic hazard path, failed classification).
+    On review-gate fallback it carries the dispatcher note (`notes`) and the
+    request routes to a human — see the `customer_reply` audit step's `source`.
     """
 
     request_id: str
@@ -238,11 +257,14 @@ class Analysis:
     confidence: float
     escalate_to_human: bool
     notes: str
+    life_safety: bool = False
+    customer_reply: "str | None" = None
     audit: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["request_type"] = self.request_type.value
+        data["status"] = "analyzed"  # counterpart of ValidationError's "rejected"
         return data
 
 
@@ -328,6 +350,40 @@ def scan_hazard_terms(text: str) -> list[str]:
                   if pattern.search(lowered))
 
 
+# Life-safety vocabulary for the urgency screen, label -> word-boundary pattern
+# (matched against normalized lowercase text), same shape as the hazard screen
+# above. Active-emergency phrasing only: past-tense damage reports ("we had a
+# fire", "smells like smoke") are routine intake and must stay quiet, but a
+# false positive on an active read still only costs one human review — bias
+# toward over-triggering within the present-tense phrasings.
+LIFE_SAFETY_TERM_PATTERNS: "dict[str, re.Pattern[str]]" = {
+    label: re.compile(pattern)
+    for label, pattern in {
+        "active_fire": r"\bon fire\b|\bflames?\b|\bburning\b|\bfire is spreading\b",
+        "active_smoke": r"\bsmoke is\b|\bfilling with smoke\b|\bfull of smoke\b",
+        "gas_leak": r"\bsmell\w* gas\b|\bgas (?:is )?leak\w*\b|\bgas smell\b|\bgas odou?r\b",
+        "carbon_monoxide": r"\bcarbon monoxide\b|\bco (?:alarm|detector)s?\b",
+        "emergency_911": r"\b911\b",
+    }.items()
+}
+
+
+def scan_life_safety_terms(text: str) -> list[str]:
+    """Deterministic life-safety screen (product pass): active fire, gas leak,
+    carbon monoxide, smoke-right-now, 911 phrasing.
+
+    Runs ahead of the LLM call and never depends on one: a match sets the
+    analysis's `life_safety` flag and forces escalate_to_human=True, while
+    classification still proceeds normally (the request type is a separate
+    question from "someone may be in danger right now"). A burning-house
+    request must never depend on a model call to say "call 911".
+    Returns the sorted matched labels (empty when clean) for the audit trail.
+    """
+    lowered = normalize_text(text).lower()
+    return sorted(label for label, pattern in LIFE_SAFETY_TERM_PATTERNS.items()
+                  if pattern.search(lowered))
+
+
 # ------------------------------------------------------------------- llm classification
 
 # The LLM only ever picks from the real categories — UNKNOWN is reserved for our
@@ -365,6 +421,56 @@ CLASSIFICATION_SCHEMA = {
 }
 
 
+# ------------------------------------------------------------- llm customer reply
+
+# The exact opener a life-safety reply must start with. Enforced in code by
+# _review_reply, never by the model critic — same doctrine as the screens: the
+# "call 911" line must never depend on a model call.
+LIFE_SAFETY_REPLY_OPENER = "If this is an emergency, call 911 first."
+
+RESPONDER_SYSTEM_PROMPT = """You draft one short reply to a customer of a restoration-services \
+company (water, fire/smoke, mold, storm, biohazard, reconstruction) who has just submitted an \
+intake request. You receive the request and the intake analysis as JSON.
+
+Hard rules:
+- 2 to 4 sentences, plain respectful tone, no marketing language.
+- Acknowledge the situation; say what happens next in general terms only.
+- NEVER state or promise pricing, quotes, or costs.
+- NEVER promise arrival, completion, or response times.
+- NEVER admit fault or liability on behalf of the company.
+- If life_safety is true, the reply MUST open with exactly: "If this is an emergency, call 911 \
+first."
+- If escalate_to_human is true, say a team member will personally review the request and reach \
+out.
+- If reviewer_feedback_on_previous_draft is present, fix every issue it lists.
+
+Return only the reply text — no preamble, no quotation marks, no JSON."""
+
+REPLY_CRITIC_SYSTEM_PROMPT = """You review one drafted customer reply for a restoration-services \
+company against a hard checklist. You receive the customer request, the intake analysis, and the \
+draft reply as JSON. Approve only if ALL checks pass:
+
+1. No pricing, quote, or cost language of any kind.
+2. No promised arrival, completion, or response times ("within the hour", "tomorrow", ...).
+3. No admission of fault or liability for the company.
+4. If life_safety is true: the reply opens with exactly "If this is an emergency, call 911 \
+first."
+5. Plain, respectful, professional tone; no marketing hype; at most 4 sentences.
+
+Set approved=true only when every check passes; otherwise approved=false with one short reason \
+per failed check."""
+
+REPLY_CRITIC_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "approved": {"type": "boolean"},
+        "reasons": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["approved", "reasons"],
+    "additionalProperties": False,
+}
+
+
 # ------------------------------------------------------------------------- pipeline
 
 class IntakeAgent:
@@ -388,11 +494,24 @@ class IntakeAgent:
         request = ServiceRequest.new(raw_text=normalize_text(raw_text), channel=channel)
         self._record(trail, "received", request=asdict(request), raw_chars=len(raw_text))
 
-        checks = self._validate(request)
+        try:
+            checks = self._validate(request)
+        except ValidationError as exc:
+            # A rejection is persisted, not vanished: finish the trail with
+            # status rejected and hand it to the caller on the exception.
+            self._record(trail, "validated", status="rejected", problems=str(exc))
+            self._record(trail, "rejected", reason=str(exc))
+            exc.audit = trail
+            log.info("%s rejected: %s", request.request_id, exc)
+            raise
         self._record(trail, "validated", status="passed", checks=checks)
 
         area = scan_service_area_mentions(request.raw_text)
         self._record(trail, "service_area", **area)
+
+        life_safety_terms = scan_life_safety_terms(request.raw_text)
+        self._record(trail, "life_safety_screen", matched_terms=life_safety_terms,
+                     triggered=bool(life_safety_terms))
 
         hazard_terms = scan_hazard_terms(request.raw_text)
         self._record(trail, "hazard_screen", matched_terms=hazard_terms,
@@ -426,6 +545,25 @@ class IntakeAgent:
         )
 
         analysis, finalize_detail = self._finalize(request, analysis)
+        if life_safety_terms:
+            # Code-owned enforcement, applied to whatever object leaves the
+            # confidence gate (a reread builds a fresh Analysis): a life-safety
+            # request always reaches a human, whatever the model said.
+            analysis.life_safety = True
+            analysis.escalate_to_human = True
+
+        # Respond stage: a reviewed customer-facing reply. Runs only after a
+        # successful LLM classification — the deterministic hazard path keeps
+        # its zero-API-call guarantee, and with no read there is nothing safe
+        # to say beyond the dispatcher note (those requests are already
+        # escalated to a human).
+        if classify_detail.get("classifier") == "llm" and classify_detail.get("model_used"):
+            self._respond(request, analysis, trail)
+        else:
+            reason = ("classification_unavailable" if classify_detail.get("classifier") == "llm"
+                      else "deterministic_hazard_path")
+            self._record(trail, "customer_reply", source="skipped", reason=reason, reply=None)
+
         self._assert_invariants(request, analysis)
         self._record(
             trail,
@@ -433,6 +571,7 @@ class IntakeAgent:
             request_type=analysis.request_type.value,
             confidence=analysis.confidence,
             escalate_to_human=analysis.escalate_to_human,
+            life_safety=analysis.life_safety,
             confidence_threshold=self.settings.confidence_threshold,
             **finalize_detail,
         )
@@ -488,6 +627,12 @@ class IntakeAgent:
         )
         assert isinstance(analysis.escalate_to_human, bool), (
             f"escalate_to_human must be bool, got {type(analysis.escalate_to_human).__name__}"
+        )
+        assert analysis.life_safety in (True, False), (
+            f"life_safety must be bool, got {analysis.life_safety!r}"
+        )
+        assert not analysis.life_safety or analysis.escalate_to_human, (
+            "life_safety=True must always carry escalate_to_human=True"
         )
 
     def _create_with_retry(self, **kwargs: Any) -> "tuple[Any, int]":
@@ -632,6 +777,143 @@ class IntakeAgent:
             "escalation_model": self.settings.escalation_model,
             **reread_detail,
         }
+
+    def _respond(self, request: ServiceRequest, analysis: Analysis,
+                 trail: "list[dict[str, Any]]") -> None:
+        """Respond stage — customer reply behind a review gate.
+
+        The responder drafts a short customer-facing reply (primary model);
+        the review gate checks it against the hard checklist (no pricing or
+        timeline promises, no liability admissions, life-safety replies open
+        with the 911 line, plain respectful tone). One revision loop max; an
+        unreviewable or twice-rejected draft falls back to the dispatcher note
+        and the request routes to a human. Every draft, every verdict (with
+        reasons), and the final reply are recorded as audit steps. A reply
+        failure never crashes the pipeline.
+        """
+        reasons: list[str] = []
+        revision = 0
+        for revision in (0, 1):
+            try:
+                draft, draft_detail = self._draft_reply(request, analysis, reasons)
+            except Exception as exc:
+                log.warning("reply draft failed for %s: %s: %s",
+                            request.request_id, type(exc).__name__, exc)
+                self._record(trail, "reply_drafted", revision=revision, reply=None,
+                             error=f"{type(exc).__name__}: {exc}")
+                reasons = ["draft unavailable — responder call failed"]
+                break
+            self._record(trail, "reply_drafted", revision=revision, reply=draft, **draft_detail)
+
+            try:
+                approved, reasons, review_detail = self._review_reply(request, analysis, draft)
+            except Exception as exc:
+                log.warning("reply review failed for %s: %s: %s",
+                            request.request_id, type(exc).__name__, exc)
+                self._record(trail, "reply_reviewed", revision=revision, approved=False,
+                             reasons=["review unavailable — an unreviewed reply is never sent"],
+                             error=f"{type(exc).__name__}: {exc}")
+                reasons = ["review unavailable — an unreviewed reply is never sent"]
+                break
+            self._record(trail, "reply_reviewed", revision=revision, approved=approved,
+                         reasons=reasons, **review_detail)
+
+            if approved:
+                analysis.customer_reply = draft
+                self._record(trail, "customer_reply", source="drafted",
+                             revisions_used=revision, reply=draft)
+                return
+
+        analysis.customer_reply = analysis.notes
+        analysis.escalate_to_human = True
+        self._record(trail, "customer_reply", source="fallback_dispatcher_note",
+                     revisions_used=revision, reasons=reasons, reply=analysis.notes)
+
+    def _draft_reply(self, request: ServiceRequest, analysis: Analysis,
+                     feedback: "list[str]") -> "tuple[str, dict[str, Any]]":
+        """One responder attempt on the primary model. Raises on any failure —
+        _respond decides what a failed draft means."""
+        directives: dict[str, Any] = {
+            "customer_request": request.raw_text,
+            "request_type": analysis.request_type.value,
+            "life_safety": analysis.life_safety,
+            "escalate_to_human": analysis.escalate_to_human,
+            "dispatcher_note": analysis.notes,
+        }
+        if feedback:
+            directives["reviewer_feedback_on_previous_draft"] = feedback
+        response, retries_used = self._create_with_retry(
+            model=self.settings.primary_model,
+            max_tokens=300,
+            system=RESPONDER_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": json.dumps(directives, ensure_ascii=False)}],
+        )
+        if response.stop_reason == "refusal":
+            raise ClassificationError(f"{self.settings.primary_model} refused the reply draft")
+        text = next((b.text for b in response.content if b.type == "text"), None)
+        if text is None or not text.strip():
+            raise ClassificationError(
+                f"{self.settings.primary_model} returned no reply text "
+                f"(stop_reason={response.stop_reason})")
+        detail = {
+            "model_used": self.settings.primary_model,
+            "usage": {
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens,
+            },
+            "retries": retries_used,
+        }
+        return text.strip(), detail
+
+    def _review_reply(self, request: ServiceRequest, analysis: Analysis,
+                      draft: str) -> "tuple[bool, list[str], dict[str, Any]]":
+        """The review gate for one draft: (approved, reasons, audit detail).
+
+        The life-safety 911 opener is checked deterministically in code first —
+        never model-dependent; a miss rejects without spending a critic call.
+        The model critic then judges the soft checklist items. Raises on a
+        failed critic call — _respond treats that as unreviewable.
+        """
+        if analysis.life_safety and not draft.startswith(LIFE_SAFETY_REPLY_OPENER):
+            return False, [f'life-safety reply must open with "{LIFE_SAFETY_REPLY_OPENER}"'], \
+                {"checker": "deterministic_opener_check"}
+
+        payload = {
+            "customer_request": request.raw_text,
+            "request_type": analysis.request_type.value,
+            "life_safety": analysis.life_safety,
+            "escalate_to_human": analysis.escalate_to_human,
+            "draft_reply": draft,
+        }
+        response, retries_used = self._create_with_retry(
+            model=self.settings.primary_model,
+            max_tokens=300,
+            system=REPLY_CRITIC_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+            output_config={"format": {"type": "json_schema", "schema": REPLY_CRITIC_SCHEMA}},
+        )
+        if response.stop_reason == "refusal":
+            raise ClassificationError(f"{self.settings.primary_model} refused the reply review")
+        text = next((b.text for b in response.content if b.type == "text"), None)
+        if text is None:
+            raise ClassificationError(
+                f"{self.settings.primary_model} returned no review verdict "
+                f"(stop_reason={response.stop_reason})")
+        data = json.loads(text)
+        approved = bool(data["approved"])
+        reasons = [str(reason) for reason in data["reasons"]]
+        if not approved and not reasons:
+            reasons = ["rejected by the critic without stated reasons"]
+        detail = {
+            "checker": "critic_llm",
+            "model_used": self.settings.primary_model,
+            "usage": {
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens,
+            },
+            "retries": retries_used,
+        }
+        return approved, reasons, detail
 
 
 # --------------------------------------------------------------------------- web ui
@@ -801,7 +1083,7 @@ class ApiHandler(_JsonHandler):
         try:
             analysis = self.agent.handle(body["text"], channel=body.get("channel", "web"))
         except ValidationError as exc:
-            self._send_json(400, {"request_id": exc.request_id, "error": str(exc)})
+            self._send_json(400, exc.to_dict())  # status rejected + the finished trail
             return
         self._send_json(200, analysis.to_dict())
 
@@ -946,6 +1228,25 @@ def selftest() -> int:
     assert scan_hazard_terms("black mold behind the tile and a musty smell") == []  # mold-tier, not hazmat
     assert scan_hazard_terms("the source of the leak is unclear to us") == []       # no substring tricks
 
+    # life-safety screen: active-emergency phrasing, deterministic (product pass).
+    # Past-tense fire/smoke damage is routine intake and must NOT trigger — the
+    # built-in eval texts below are the canonical negatives.
+    assert scan_life_safety_terms("Our house is ON FIRE right now!") == ["active_fire"]
+    assert scan_life_safety_terms("there are flames coming out of the kitchen") == ["active_fire"]
+    assert scan_life_safety_terms("the attic is still burning a little") == ["active_fire"]
+    assert scan_life_safety_terms("we smell gas near the water heater") == ["gas_leak"]
+    assert scan_life_safety_terms("I think the gas is leaking behind the stove") == ["gas_leak"]
+    assert scan_life_safety_terms("our carbon monoxide detector keeps going off") == ["carbon_monoxide"]
+    assert scan_life_safety_terms("the CO alarm went off twice tonight") == ["carbon_monoxide"]
+    assert scan_life_safety_terms("smoke is filling the hallway, should we call 911?") == \
+        ["active_smoke", "emergency_911"]
+    assert scan_life_safety_terms(SAMPLE_REQUEST) == []
+    assert scan_life_safety_terms("Grease fire in the kitchen last night, whole house "
+                                  "smells like smoke and there's soot on the ceiling.") == []
+    assert scan_life_safety_terms("We had an electrical fire in the garage, everything "
+                                  "in there is charred and smells like smoke.") == []
+    assert scan_life_safety_terms("the flamespray coating co. redid our deck") == []  # no substring tricks
+
     # --- LLM classification (stage 4), exercised via a fake client — no network ---
 
     class _FakeTextBlock:
@@ -980,6 +1281,25 @@ def selftest() -> int:
         return _FakeResponse(json.dumps(
             {"request_type": request_type, "confidence": confidence, "notes": notes}))
 
+    # Reply-stage plumbing for the classification-focused tests: the product
+    # pass added a responder + critic after classification, so classification
+    # fakes are wrapped to answer those calls with a well-formed draft (911
+    # opener included, so life-safety paths approve) and an approving verdict.
+    # Reply calls stay invisible to each test's `calls` list — those asserts
+    # remain exact statements about the classification chain; the reply flow
+    # has its own dedicated tests below.
+    canned_reply = (f"{LIFE_SAFETY_REPLY_OPENER} Thank you for reaching out — our team "
+                    "has your request and will be in touch shortly.")
+
+    def _reply_aware(classify_handler):
+        def routed(**kwargs):
+            if kwargs.get("system") == RESPONDER_SYSTEM_PROMPT:
+                return _FakeResponse(canned_reply)
+            if kwargs.get("system") == REPLY_CRITIC_SYSTEM_PROMPT:
+                return _FakeResponse(json.dumps({"approved": True, "reasons": []}))
+            return classify_handler(**kwargs)
+        return routed
+
     # success on the primary model
     calls: list[str] = []
 
@@ -987,7 +1307,7 @@ def selftest() -> int:
         calls.append(kwargs["model"])
         return _json_response("water_damage", 0.87, "Explicit flooding and standing water reported.")
 
-    agent_ok = IntakeAgent(settings, client=_FakeClient(primary_ok))
+    agent_ok = IntakeAgent(settings, client=_FakeClient(_reply_aware(primary_ok)))
     analysis = agent_ok.handle(SAMPLE_REQUEST)
     assert analysis.request_type is RequestType.WATER_DAMAGE
     assert analysis.confidence == 0.87
@@ -999,6 +1319,7 @@ def selftest() -> int:
     assert classified_step["classifier"] == "llm", classified_step
     hazard_step = next(s for s in analysis.audit if s["step"] == "hazard_screen")
     assert hazard_step["triggered"] is False and hazard_step["matched_terms"] == [], hazard_step
+    assert analysis.to_dict()["status"] == "analyzed"
 
     # hazmat phrasing (the live-bug regression case): deterministic screen
     # classifies + escalates and the LLM is never consulted
@@ -1021,7 +1342,202 @@ def selftest() -> int:
     assert classified_step["classifier"] == "hazard_term_screen", classified_step
     finalized_step = next(s for s in analysis.audit if s["step"] == "finalized")
     assert finalized_step["escalate_to_human"] is True, finalized_step
+    assert analysis.customer_reply is None, "hazard path must make zero LLM calls, so no draft"
+    reply_step = next(s for s in analysis.audit if s["step"] == "customer_reply")
+    assert reply_step["source"] == "skipped", reply_step
+    assert reply_step["reason"] == "deterministic_hazard_path", reply_step
     json.dumps(analysis.to_dict())  # deterministic path must stay JSON-serializable too
+
+    # --- Life-safety screen (product pass): flag + forced human escalation, ---
+    # --- while the LLM still classifies the request type normally           ---
+
+    calls = []
+
+    def fire_read(**kwargs):
+        calls.append(kwargs["model"])
+        return _json_response("fire_smoke_damage", 0.97, "Active structure fire reported.")
+
+    agent_fire = IntakeAgent(settings, client=_FakeClient(_reply_aware(fire_read)))
+    analysis = agent_fire.handle("Our house is on fire right now, flames in the kitchen!")
+    assert analysis.life_safety is True
+    assert analysis.escalate_to_human is True, "life safety must force human escalation"
+    assert analysis.request_type is RequestType.FIRE_SMOKE_DAMAGE, "LLM classification must still run"
+    assert calls == [settings.primary_model], calls
+    ls_step = next(s for s in analysis.audit if s["step"] == "life_safety_screen")
+    assert ls_step["triggered"] is True and "active_fire" in ls_step["matched_terms"], ls_step
+    finalized_step = next(s for s in analysis.audit if s["step"] == "finalized")
+    assert finalized_step["life_safety"] is True and finalized_step["escalate_to_human"] is True
+    assert analysis.to_dict()["life_safety"] is True
+    json.dumps(analysis.to_dict())
+
+    # no life-safety phrasing -> flag stays False, nothing forced, step still recorded
+    analysis = agent_ok.handle(SAMPLE_REQUEST)
+    assert analysis.life_safety is False and analysis.escalate_to_human is False
+    ls_step = next(s for s in analysis.audit if s["step"] == "life_safety_screen")
+    assert ls_step["triggered"] is False and ls_step["matched_terms"] == [], ls_step
+    assert analysis.to_dict()["life_safety"] is False
+
+    # the flag survives a low-confidence escalation reread (which builds a fresh
+    # Analysis) — enforcement applies to whatever object leaves the pipeline
+    def low_fire_then_resolved(**kwargs):
+        if kwargs["model"] == settings.escalation_model:
+            return _json_response("fire_smoke_damage", 0.93, "Escalated read: active fire.")
+        return _json_response("fire_smoke_damage", 0.4, "Uncertain primary read.")
+
+    agent_fire_low = IntakeAgent(settings, client=_FakeClient(_reply_aware(low_fire_then_resolved)))
+    analysis = agent_fire_low.handle("Smoke is everywhere upstairs and we can smell gas!")
+    assert analysis.life_safety is True and analysis.escalate_to_human is True
+    assert analysis.confidence == 0.93, "reread result must be kept, flag applied on top"
+    ls_step = next(s for s in analysis.audit if s["step"] == "life_safety_screen")
+    assert ls_step["matched_terms"] == ["active_smoke", "gas_leak"], ls_step
+
+    # life-safety + hazmat co-trigger: hazard short-circuit owns classification
+    # (zero LLM calls), and the life-safety flag is still set on the result
+    calls = []
+
+    def must_not_be_used(**kwargs):
+        calls.append(kwargs["model"])
+        return _json_response("water_damage", 0.99, "This read must never be used.")
+
+    agent_both = IntakeAgent(settings, client=_FakeClient(must_not_be_used))
+    analysis = agent_both.handle("There's a gas leak and chemical fumes are filling the basement")
+    assert analysis.request_type is RequestType.BIOHAZARD_CLEANUP
+    assert analysis.life_safety is True and analysis.escalate_to_human is True
+    assert calls == [], f"hazard+life-safety request must not reach the LLM: {calls}"
+    assert analysis.customer_reply is None, "deterministic path must stay zero-API-call"
+
+    # --- Customer reply with a review gate (product pass): responder drafts, ---
+    # --- critic reviews against the hard checklist, one revision loop max    ---
+
+    # clean path: draft approved first pass; draft, verdict, and final reply all
+    # recorded; the whole flow runs on the primary model
+    calls = []
+
+    def reply_flow(**kwargs):
+        calls.append(kwargs["model"])
+        if kwargs["system"] == RESPONDER_SYSTEM_PROMPT:
+            return _FakeResponse("Thank you for reaching out — our team is reviewing "
+                                 "your request and will contact you shortly.")
+        if kwargs["system"] == REPLY_CRITIC_SYSTEM_PROMPT:
+            return _FakeResponse(json.dumps({"approved": True, "reasons": []}))
+        return _json_response("water_damage", 0.9, "Flooding reported.")
+
+    agent_reply = IntakeAgent(settings, client=_FakeClient(reply_flow))
+    analysis = agent_reply.handle(SAMPLE_REQUEST)
+    assert analysis.customer_reply == ("Thank you for reaching out — our team is reviewing "
+                                       "your request and will contact you shortly.")
+    assert analysis.escalate_to_human is False
+    assert calls == [settings.primary_model] * 3, calls  # classify, draft, critique
+    drafted_steps = [s for s in analysis.audit if s["step"] == "reply_drafted"]
+    reviewed_steps = [s for s in analysis.audit if s["step"] == "reply_reviewed"]
+    reply_step = next(s for s in analysis.audit if s["step"] == "customer_reply")
+    assert len(drafted_steps) == 1 and drafted_steps[0]["revision"] == 0
+    assert drafted_steps[0]["reply"] == analysis.customer_reply
+    assert len(reviewed_steps) == 1 and reviewed_steps[0]["approved"] is True
+    assert reviewed_steps[0]["reasons"] == []
+    assert reply_step["source"] == "drafted" and reply_step["revisions_used"] == 0
+    assert reply_step["reply"] == analysis.customer_reply
+    assert analysis.audit[-1]["step"] == "finalized", "finalized stays the terminal step"
+    assert analysis.to_dict()["customer_reply"] == analysis.customer_reply
+    json.dumps(analysis.to_dict())
+
+    # rejected once with reasons -> revision prompt carries the critic's
+    # feedback -> second draft approved
+    responder_prompts = []
+
+    def reply_revise_flow(**kwargs):
+        if kwargs["system"] == RESPONDER_SYSTEM_PROMPT:
+            responder_prompts.append(kwargs["messages"][0]["content"])
+            if len(responder_prompts) == 1:
+                return _FakeResponse("We will be there tomorrow and it will cost $500.")
+            return _FakeResponse("Thank you for reaching out — our team will contact you shortly.")
+        if kwargs["system"] == REPLY_CRITIC_SYSTEM_PROMPT:
+            if "$500" in kwargs["messages"][0]["content"]:
+                return _FakeResponse(json.dumps(
+                    {"approved": False, "reasons": ["promises a price and a timeline"]}))
+            return _FakeResponse(json.dumps({"approved": True, "reasons": []}))
+        return _json_response("water_damage", 0.9, "Flooding reported.")
+
+    agent_revise = IntakeAgent(settings, client=_FakeClient(reply_revise_flow))
+    analysis = agent_revise.handle(SAMPLE_REQUEST)
+    assert analysis.customer_reply == "Thank you for reaching out — our team will contact you shortly."
+    assert analysis.escalate_to_human is False
+    assert len(responder_prompts) == 2
+    assert "promises a price and a timeline" in responder_prompts[1], \
+        "revision prompt must carry the critic's reasons"
+    reviewed_steps = [s for s in analysis.audit if s["step"] == "reply_reviewed"]
+    assert [s["approved"] for s in reviewed_steps] == [False, True], reviewed_steps
+    assert reviewed_steps[0]["reasons"] == ["promises a price and a timeline"]
+    reply_step = next(s for s in analysis.audit if s["step"] == "customer_reply")
+    assert reply_step["source"] == "drafted" and reply_step["revisions_used"] == 1
+
+    # rejected twice -> dispatcher-note fallback + human escalation; exactly one
+    # revision is ever attempted
+    def reply_never_good(**kwargs):
+        if kwargs["system"] == RESPONDER_SYSTEM_PROMPT:
+            return _FakeResponse("We guarantee arrival within the hour; this was our fault.")
+        if kwargs["system"] == REPLY_CRITIC_SYSTEM_PROMPT:
+            return _FakeResponse(json.dumps({"approved": False, "reasons": ["liability admission"]}))
+        return _json_response("water_damage", 0.9, "Flooding reported; dispatcher note text.")
+
+    agent_reply_fallback = IntakeAgent(settings, client=_FakeClient(reply_never_good))
+    analysis = agent_reply_fallback.handle(SAMPLE_REQUEST)
+    assert analysis.escalate_to_human is True, "an unapprovable reply must route to a human"
+    assert analysis.customer_reply == analysis.notes, "fallback is the dispatcher note"
+    assert len([s for s in analysis.audit if s["step"] == "reply_drafted"]) == 2
+    reply_step = next(s for s in analysis.audit if s["step"] == "customer_reply")
+    assert reply_step["source"] == "fallback_dispatcher_note", reply_step
+    assert reply_step["reasons"] == ["liability admission"], reply_step
+    json.dumps(analysis.to_dict())
+
+    # the 911 opener on life-safety replies is enforced by CODE: even a critic
+    # that approves a draft missing the opener cannot ship it
+    def reply_missing_opener(**kwargs):
+        if kwargs["system"] == RESPONDER_SYSTEM_PROMPT:
+            return _FakeResponse("Our crew is being dispatched — hang tight.")
+        if kwargs["system"] == REPLY_CRITIC_SYSTEM_PROMPT:
+            return _FakeResponse(json.dumps({"approved": True, "reasons": []}))
+        return _json_response("fire_smoke_damage", 0.97, "Active structure fire reported.")
+
+    agent_no_opener = IntakeAgent(settings, client=_FakeClient(reply_missing_opener))
+    analysis = agent_no_opener.handle("Our house is on fire right now!")
+    assert analysis.life_safety is True
+    assert analysis.customer_reply == analysis.notes and analysis.escalate_to_human is True
+    reviewed_steps = [s for s in analysis.audit if s["step"] == "reply_reviewed"]
+    assert reviewed_steps and all(s["approved"] is False for s in reviewed_steps), reviewed_steps
+    assert any("911" in reason for s in reviewed_steps for reason in s["reasons"]), reviewed_steps
+
+    # life-safety reply that does open correctly is approved and kept
+    def reply_with_opener(**kwargs):
+        if kwargs["system"] == RESPONDER_SYSTEM_PROMPT:
+            return _FakeResponse(f"{LIFE_SAFETY_REPLY_OPENER} Our team has been alerted "
+                                 "and a person is reviewing your request right now.")
+        if kwargs["system"] == REPLY_CRITIC_SYSTEM_PROMPT:
+            return _FakeResponse(json.dumps({"approved": True, "reasons": []}))
+        return _json_response("fire_smoke_damage", 0.97, "Active structure fire reported.")
+
+    agent_opener = IntakeAgent(settings, client=_FakeClient(reply_with_opener))
+    analysis = agent_opener.handle("Flames are coming out of the attic right now!")
+    assert analysis.life_safety is True and analysis.escalate_to_human is True
+    assert analysis.customer_reply.startswith(LIFE_SAFETY_REPLY_OPENER)
+    reply_step = next(s for s in analysis.audit if s["step"] == "customer_reply")
+    assert reply_step["source"] == "drafted"
+
+    # critic infrastructure failure -> never ship an unreviewed draft: fall back
+    # to the dispatcher note and route to a human
+    def critic_down(**kwargs):
+        if kwargs["system"] == RESPONDER_SYSTEM_PROMPT:
+            return _FakeResponse("Thanks — our team will reach out shortly.")
+        if kwargs["system"] == REPLY_CRITIC_SYSTEM_PROMPT:
+            raise RuntimeError("simulated critic outage")
+        return _json_response("water_damage", 0.9, "Flooding reported.")
+
+    agent_critic_down = IntakeAgent(settings, client=_FakeClient(critic_down))
+    analysis = agent_critic_down.handle(SAMPLE_REQUEST)
+    assert analysis.customer_reply == analysis.notes and analysis.escalate_to_human is True
+    assert analysis.customer_reply != "Thanks — our team will reach out shortly."
+    reply_step = next(s for s in analysis.audit if s["step"] == "customer_reply")
+    assert reply_step["source"] == "fallback_dispatcher_note", reply_step
 
     # primary model fails -> falls back to the secondary model
     calls = []
@@ -1034,7 +1550,7 @@ def selftest() -> int:
         # test of the classify fallback chain — stage-5 escalation has its own tests
         return _json_response("mold_remediation", 0.85, "Musty odor and visible growth reported.")
 
-    agent_fallback = IntakeAgent(settings, client=_FakeClient(primary_fails_then_ok))
+    agent_fallback = IntakeAgent(settings, client=_FakeClient(_reply_aware(primary_fails_then_ok)))
     analysis = agent_fallback.handle(SAMPLE_REQUEST)
     assert analysis.request_type is RequestType.MOLD_REMEDIATION
     assert analysis.escalate_to_human is False
@@ -1055,6 +1571,10 @@ def selftest() -> int:
     classified_step = next(s for s in analysis.audit if s["step"] == "classified")
     assert classified_step["model_used"] is None
     assert len(classified_step["attempts"]) == 2
+    assert analysis.customer_reply is None, "no reply drafting without a classification"
+    reply_step = next(s for s in analysis.audit if s["step"] == "customer_reply")
+    assert reply_step["source"] == "skipped", reply_step
+    assert reply_step["reason"] == "classification_unavailable", reply_step
 
     # a refusal is treated as a failed attempt, not a crash on empty content
     def refuses(**kwargs):
@@ -1069,7 +1589,7 @@ def selftest() -> int:
     def overconfident(**kwargs):
         return _json_response("storm_damage", 1.4, "Overconfident test double.")
 
-    agent_clamped = IntakeAgent(settings, client=_FakeClient(overconfident))
+    agent_clamped = IntakeAgent(settings, client=_FakeClient(_reply_aware(overconfident)))
     analysis = agent_clamped.handle(SAMPLE_REQUEST)
     assert analysis.confidence == 1.0, analysis.confidence
 
@@ -1082,7 +1602,7 @@ def selftest() -> int:
         calls.append(kwargs["model"])
         return _json_response("water_damage", 0.9, "High-confidence primary read.")
 
-    agent_high = IntakeAgent(settings, client=_FakeClient(high_confidence))
+    agent_high = IntakeAgent(settings, client=_FakeClient(_reply_aware(high_confidence)))
     analysis = agent_high.handle(SAMPLE_REQUEST)
     assert analysis.confidence == 0.9 and analysis.escalate_to_human is False
     assert calls == [settings.primary_model], calls  # escalation_model never invoked
@@ -1098,7 +1618,7 @@ def selftest() -> int:
             return _json_response("mold_remediation", 0.92, "Escalated read: clear mold case.")
         return _json_response("mold_remediation", 0.4, "Uncertain primary read.")
 
-    agent_escalated_ok = IntakeAgent(settings, client=_FakeClient(low_then_resolved))
+    agent_escalated_ok = IntakeAgent(settings, client=_FakeClient(_reply_aware(low_then_resolved)))
     analysis = agent_escalated_ok.handle(SAMPLE_REQUEST)
     assert analysis.confidence == 0.92 and analysis.escalate_to_human is False
     assert calls == [settings.primary_model, settings.escalation_model], calls
@@ -1112,7 +1632,7 @@ def selftest() -> int:
             return _json_response("general_inquiry", 0.5, "Still uncertain even after escalation.")
         return _json_response("general_inquiry", 0.3, "Uncertain primary read.")
 
-    agent_escalated_human = IntakeAgent(settings, client=_FakeClient(low_then_still_low))
+    agent_escalated_human = IntakeAgent(settings, client=_FakeClient(_reply_aware(low_then_still_low)))
     analysis = agent_escalated_human.handle(SAMPLE_REQUEST)
     assert analysis.confidence == 0.5 and analysis.escalate_to_human is True
     assert analysis.request_type is RequestType.GENERAL_INQUIRY
@@ -1126,7 +1646,8 @@ def selftest() -> int:
             raise RuntimeError("simulated opus outage")
         return _json_response("general_inquiry", 0.3, "Uncertain primary read.")
 
-    agent_escalation_failed = IntakeAgent(settings, client=_FakeClient(low_then_escalation_fails))
+    agent_escalation_failed = IntakeAgent(settings,
+                                          client=_FakeClient(_reply_aware(low_then_escalation_fails)))
     analysis = agent_escalation_failed.handle(SAMPLE_REQUEST)
     assert analysis.confidence == 0.3 and analysis.escalate_to_human is True
     assert analysis.request_type is RequestType.GENERAL_INQUIRY
@@ -1153,7 +1674,8 @@ def selftest() -> int:
             raise _transient()
         return _json_response("water_damage", 0.9, "Recovered after retries.")
 
-    agent_flaky = IntakeAgent(settings, client=_FakeClient(flaky_then_ok), sleep=sleeps.append)
+    agent_flaky = IntakeAgent(settings, client=_FakeClient(_reply_aware(flaky_then_ok)),
+                              sleep=sleeps.append)
     analysis = agent_flaky.handle(SAMPLE_REQUEST)
     assert analysis.request_type is RequestType.WATER_DAMAGE and analysis.escalate_to_human is False
     assert calls == [settings.primary_model] * 3, calls
@@ -1200,6 +1722,17 @@ def selftest() -> int:
             raise AssertionError(f"must reject raw={raw[:20]!r} channel={channel!r}")
         except ValidationError as exc:
             assert exc.request_id, "rejections must still carry a request_id"
+            # product pass: a rejection carries a finished, persistable trail
+            # (status rejected) instead of discarding what was recorded
+            assert exc.audit and exc.audit[0]["step"] == "received", exc.audit
+            validated_step = next(s for s in exc.audit if s["step"] == "validated")
+            assert validated_step["status"] == "rejected" and validated_step["problems"]
+            rejected_step = next(s for s in exc.audit if s["step"] == "rejected")
+            assert rejected_step["reason"] == str(exc)
+            record = exc.to_dict()
+            assert record["status"] == "rejected" and record["request_id"] == exc.request_id
+            assert record["error"] == str(exc) and record["audit"] is exc.audit
+            json.dumps(record)  # the rejected record must be store-ready too
 
     # web layer: real HTTP round-trips on ephemeral ports (no fixed-port collisions)
     ApiHandler.agent = agent_ok
@@ -1231,7 +1764,10 @@ def selftest() -> int:
             urllib.request.urlopen(bad)
             raise AssertionError("short text must return HTTP 400")
         except urllib.error.HTTPError as err:
-            assert err.code == 400 and "error" in json.loads(err.read())
+            body = json.loads(err.read())
+            assert err.code == 400 and "error" in body
+            assert body["status"] == "rejected", body
+            assert body["audit"] and body["audit"][-1]["step"] == "rejected", body
 
         with urllib.request.urlopen(f"{api}/health") as res:
             assert res.status == 200 and json.loads(res.read())["status"] == "ok"
@@ -1245,8 +1781,9 @@ def selftest() -> int:
             server.shutdown()
             server.server_close()
 
-    print("selftest: all checks passed (deterministic layer, hazard screen, LLM "
-          "classification, retry/backoff, confidence escalation, web handlers)")
+    print("selftest: all checks passed (deterministic layer, hazard + life-safety "
+          "screens, LLM classification, retry/backoff, confidence escalation, "
+          "web handlers)")
     return 0
 
 
@@ -1376,7 +1913,7 @@ def main(argv: "list[str] | None" = None) -> int:
         analysis = agent.handle(raw_text)
     except ValidationError as exc:
         log.error("request rejected: %s", exc)
-        print(json.dumps({"request_id": exc.request_id, "error": str(exc)}, indent=2))
+        print(json.dumps(exc.to_dict(), indent=2))
         return 2
 
     print(json.dumps(analysis.to_dict(), indent=2))

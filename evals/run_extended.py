@@ -41,7 +41,7 @@ VALID_OUTCOMES = frozenset({"analyzed", "rejected"})
 VALID_TYPES = frozenset(t.value for t in agent.RequestType)
 CASE_KEYS = frozenset({"id", "category", "why", "text", "repeat_text",
                        "expect", "known_failing", "diagnosis"})
-EXPECT_KEYS = frozenset({"outcome", "types", "escalate", "pass_if_escalated"})
+EXPECT_KEYS = frozenset({"outcome", "types", "escalate", "life_safety", "pass_if_escalated"})
 
 
 # ------------------------------------------------------------------- case loading
@@ -91,7 +91,8 @@ def validate_cases(cases: list[dict[str, Any]]) -> list[str]:
         outcome = expect.get("outcome")
         if outcome not in VALID_OUTCOMES:
             problems.append(f"{where}: expect.outcome must be one of {sorted(VALID_OUTCOMES)}")
-        if outcome == "rejected" and (set(expect) & {"types", "escalate", "pass_if_escalated"}):
+        if outcome == "rejected" and (set(expect) & {"types", "escalate", "life_safety",
+                                                     "pass_if_escalated"}):
             problems.append(f"{where}: a 'rejected' case cannot also expect types/escalation")
 
         types = expect.get("types", [])
@@ -99,6 +100,8 @@ def validate_cases(cases: list[dict[str, Any]]) -> list[str]:
             problems.append(f"{where}: expect.types must be a list drawn from {sorted(VALID_TYPES)}")
         if "escalate" in expect and not isinstance(expect["escalate"], bool):
             problems.append(f"{where}: expect.escalate must be a bool")
+        if "life_safety" in expect and not isinstance(expect["life_safety"], bool):
+            problems.append(f"{where}: expect.life_safety must be a bool")
         if "pass_if_escalated" in expect and expect.get("pass_if_escalated") is not True:
             problems.append(f"{where}: pass_if_escalated is either absent or literally true")
         if "pass_if_escalated" in expect and "escalate" in expect:
@@ -121,12 +124,14 @@ def case_text(case: dict[str, Any]) -> str:
 
 # ----------------------------------------------------------------------- scoring
 
-def judge(case: dict[str, Any], outcome: str,
-          analysis: "agent.Analysis | None") -> tuple[bool, str]:
+def judge(case: dict[str, Any], outcome: str, analysis: "agent.Analysis | None",
+          rejection: "dict[str, Any] | None" = None) -> tuple[bool, str]:
     """Score one observed result against the case's expectations.
 
-    Pure function of (case, outcome, analysis) so --check can exercise it
-    offline with synthetic Analysis objects.
+    Pure function of (case, outcome, analysis, rejection) so --check can
+    exercise it offline with synthetic inputs. `rejection` is the
+    ValidationError.to_dict() record when the pipeline rejected the request;
+    None means no trail info was offered (older pipelines).
     """
     expect = case["expect"]
     if outcome == "error":
@@ -134,11 +139,37 @@ def judge(case: dict[str, Any], outcome: str,
     if outcome != expect["outcome"]:
         return False, f"expected outcome={expect['outcome']}, got {outcome}"
     if outcome == "rejected":
+        # Product pass: rejections must be persistable — status rejected and a
+        # finished (non-empty) audit trail on the exception record.
+        if rejection is not None:
+            if rejection.get("status") != "rejected" or not rejection.get("audit"):
+                return False, "rejected without a persistable audit trail (status rejected)"
+            return True, "rejected deterministically, with a store-ready rejected trail"
         return True, "rejected by deterministic validation, as expected"
 
     assert analysis is not None  # outcome == "analyzed" guarantees this
     got_type = analysis.request_type.value
     escalated = analysis.escalate_to_human
+
+    # The life-safety flag is a deterministic-screen assertion — checked before
+    # pass_if_escalated, because human routing must not excuse a missed (or
+    # spurious) screen decision.
+    if "life_safety" in expect:
+        flagged = bool(getattr(analysis, "life_safety", False))
+        if flagged is not expect["life_safety"]:
+            return False, f"life_safety={flagged}, expected {expect['life_safety']}"
+
+    # Deterministic reply invariant, checked on every analyzed case: a drafted
+    # (non-fallback) reply on a life-safety analysis must open with the 911
+    # line. The pipeline enforces this in code, so a violation is a pipeline
+    # bug, not a model miss. Fallback replies are exempt — they carry the
+    # dispatcher note and the request routes to a human.
+    reply_step = next((s for s in getattr(analysis, "audit", [])
+                       if s.get("step") == "customer_reply"), None)
+    if (getattr(analysis, "life_safety", False) and reply_step is not None
+            and reply_step.get("source") == "drafted"
+            and not str(reply_step.get("reply") or "").startswith(agent.LIFE_SAFETY_REPLY_OPENER)):
+        return False, "drafted life-safety reply missing the 911 opener (pipeline invariant)"
 
     if expect.get("pass_if_escalated") and escalated:
         return True, f"routed to human (acceptable for this case); read was {got_type}"
@@ -148,7 +179,9 @@ def judge(case: dict[str, Any], outcome: str,
         return False, f"type {got_type} not in accepted {types}"
     if "escalate" in expect and escalated is not expect["escalate"]:
         return False, f"escalate_to_human={escalated}, expected {expect['escalate']}"
-    return True, f"classified {got_type}" + (" and escalated" if escalated else "")
+    flags = (" and escalated" if escalated else "") + \
+        ("; life-safety flagged" if getattr(analysis, "life_safety", False) else "")
+    return True, f"classified {got_type}" + flags
 
 
 def status_of(passed: bool, known_failing: bool) -> str:
@@ -174,18 +207,21 @@ def run_live(cases: list[dict[str, Any]], markdown: bool) -> int:
     for case in cases:
         started = time.monotonic()
         analysis: "agent.Analysis | None" = None
+        rejection: "dict[str, Any] | None" = None
         detail = ""
         try:
             analysis = intake.handle(case_text(case))
             outcome = "analyzed"
         except agent.ValidationError as exc:
             outcome, detail = "rejected", str(exc)
+            to_dict = getattr(exc, "to_dict", None)
+            rejection = to_dict() if callable(to_dict) else None
         except Exception as exc:  # never let one case kill the suite
             outcome, detail = "error", f"{type(exc).__name__}: {exc}"
             log.error("case %s crashed the pipeline: %s", case["id"], detail)
         elapsed = time.monotonic() - started
 
-        passed, reason = judge(case, outcome, analysis)
+        passed, reason = judge(case, outcome, analysis, rejection=rejection)
         status = status_of(passed, case.get("known_failing", False))
         rows.append({
             "case": case, "status": status, "outcome": outcome, "reason": reason,
@@ -194,8 +230,9 @@ def run_live(cases: list[dict[str, Any]], markdown: bool) -> int:
         got = analysis.request_type.value if analysis else outcome
         conf = f"{analysis.confidence:.2f}" if analysis else "   -"
         esc = str(analysis.escalate_to_human) if analysis else "-"
+        life = str(bool(getattr(analysis, "life_safety", False))) if analysis else "-"
         print(f"{status:<5}  {case['id']:<32} got={got:<18} conf={conf} "
-              f"escalate={esc:<5} ({elapsed:.1f}s)  {reason}")
+              f"escalate={esc:<5} life={life:<5} ({elapsed:.1f}s)  {reason}")
 
     print()
     return summarize(rows, markdown)
@@ -220,9 +257,19 @@ def summarize(rows: list[dict[str, Any]], markdown: bool) -> int:
             for step in r["analysis"].audit
             if step["step"] == "finalized" and step.get("action") != "passed"
         )
+        life_flags = sum(bool(getattr(r["analysis"], "life_safety", False)) for r in analyzed)
         print(f"analyzed cases: {len(analyzed)}   avg confidence: {avg_conf:.2f}   "
               f"escalated to human: {escalated}/{len(analyzed)}   "
+              f"life-safety flags: {life_flags}   "
               f"escalation-model rereads: {rereads}   avg latency: {avg_secs:.1f}s")
+        reply_sources = [
+            next((s.get("source") for s in r["analysis"].audit
+                  if s.get("step") == "customer_reply"), None)
+            for r in analyzed
+        ]
+        print(f"customer replies: drafted {sum(s == 'drafted' for s in reply_sources)} / "
+              f"fallback {sum(s == 'fallback_dispatcher_note' for s in reply_sources)} / "
+              f"skipped {sum(s == 'skipped' for s in reply_sources)}")
 
     for r in by_status["FAIL"]:
         print(f"  FAIL  {r['case']['id']}: {r['reason']}")
@@ -242,8 +289,8 @@ def summarize(rows: list[dict[str, Any]], markdown: bool) -> int:
 
 def results_markdown(rows: list[dict[str, Any]]) -> str:
     lines = [
-        "| case | category | status | expected | got | conf | escalated | latency |",
-        "|---|---|---|---|---|---|---|---|",
+        "| case | category | status | expected | got | conf | escalated | life | reply | latency |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
         case, analysis = r["case"], r["analysis"]
@@ -254,13 +301,22 @@ def results_markdown(rows: list[dict[str, Any]]) -> str:
             expected = " / ".join(expect.get("types") or ["any"])
             if expect.get("escalate") is True:
                 expected += " + escalate"
+            if expect.get("life_safety") is True:
+                expected += " + life-safety"
             if expect.get("pass_if_escalated"):
                 expected += " (or human)"
         got = analysis.request_type.value if analysis else r["outcome"]
         conf = f"{analysis.confidence:.2f}" if analysis else "—"
         esc = ("yes" if analysis.escalate_to_human else "no") if analysis else "—"
+        life = ("yes" if getattr(analysis, "life_safety", False) else "no") if analysis else "—"
+        reply = "—"
+        if analysis is not None:
+            source = next((s.get("source") for s in analysis.audit
+                           if s.get("step") == "customer_reply"), None)
+            reply = {"drafted": "drafted", "fallback_dispatcher_note": "fallback",
+                     "skipped": "skipped"}.get(source, "—")
         lines.append(f"| {case['id']} | {case['category']} | {r['status']} | {expected} "
-                     f"| {got} | {conf} | {esc} | {r['seconds']:.1f}s |")
+                     f"| {got} | {conf} | {esc} | {life} | {reply} | {r['seconds']:.1f}s |")
     return "\n".join(lines)
 
 
@@ -276,16 +332,49 @@ def check(cases: list[dict[str, Any]]) -> int:
         return 1
 
     def synthetic(request_type: agent.RequestType, confidence: float,
-                  escalate: bool) -> agent.Analysis:
+                  escalate: bool, life_safety: bool = False) -> agent.Analysis:
         return agent.Analysis(request_id="req_selftest", request_type=request_type,
                               confidence=confidence, escalate_to_human=escalate,
-                              notes="synthetic scorer-check analysis")
+                              notes="synthetic scorer-check analysis",
+                              life_safety=life_safety)
 
     water = synthetic(agent.RequestType.WATER_DAMAGE, 0.9, False)
     storm_escalated = synthetic(agent.RequestType.STORM_DAMAGE, 0.4, True)
+    fire_life_safety = synthetic(agent.RequestType.FIRE_SMOKE_DAMAGE, 0.97, True, life_safety=True)
+
+    # Reply-gate synthetics (product pass): the scorer enforces one deterministic
+    # reply invariant on every analyzed case — a drafted (non-fallback) reply on
+    # a life-safety analysis must open with the 911 line. Fallback replies are
+    # exempt (they carry the dispatcher note and route to a human).
+    def with_reply(analysis: agent.Analysis, source: str, reply: "str | None") -> agent.Analysis:
+        analysis.customer_reply = reply
+        analysis.audit = [*analysis.audit,
+                          {"step": "customer_reply", "source": source, "reply": reply}]
+        return analysis
+
+    opener = agent.LIFE_SAFETY_REPLY_OPENER
+    fire_reply_ok = with_reply(
+        synthetic(agent.RequestType.FIRE_SMOKE_DAMAGE, 0.97, True, life_safety=True),
+        "drafted", f"{opener} A team member is reviewing your request right now.")
+    fire_reply_bad = with_reply(
+        synthetic(agent.RequestType.FIRE_SMOKE_DAMAGE, 0.97, True, life_safety=True),
+        "drafted", "Our crew is being dispatched — hang tight.")
+    fire_reply_fallback = with_reply(
+        synthetic(agent.RequestType.FIRE_SMOKE_DAMAGE, 0.97, True, life_safety=True),
+        "fallback_dispatcher_note", "dispatcher note text")
+    water_reply = with_reply(synthetic(agent.RequestType.WATER_DAMAGE, 0.9, False),
+                             "drafted", "Thank you — our team will be in touch shortly.")
 
     scenarios = [  # (expect, outcome, analysis, should_pass)
         ({"outcome": "analyzed", "types": ["water_damage"]}, "analyzed", water, True),
+        ({"outcome": "analyzed", "life_safety": True}, "analyzed", fire_life_safety, True),
+        ({"outcome": "analyzed", "life_safety": True}, "analyzed", storm_escalated, False),
+        ({"outcome": "analyzed", "life_safety": False}, "analyzed", water, True),
+        ({"outcome": "analyzed", "life_safety": False}, "analyzed", fire_life_safety, False),
+        # a missed life-safety flag must fail even when escalation would
+        # otherwise soften the type check
+        ({"outcome": "analyzed", "life_safety": True, "pass_if_escalated": True},
+         "analyzed", storm_escalated, False),
         ({"outcome": "analyzed", "types": ["mold_remediation"]}, "analyzed", water, False),
         ({"outcome": "analyzed", "types": ["water_damage"], "escalate": False}, "analyzed", water, True),
         ({"outcome": "analyzed", "escalate": True}, "analyzed", water, False),
@@ -295,6 +384,12 @@ def check(cases: list[dict[str, Any]]) -> int:
         ({"outcome": "analyzed", "types": ["general_inquiry"], "pass_if_escalated": True},
          "analyzed", water, False),
         ({"outcome": "analyzed", "types": []}, "analyzed", water, True),
+        # 911-opener invariant on drafted life-safety replies (checked on every
+        # analyzed case; fallback and non-life-safety replies are exempt)
+        ({"outcome": "analyzed", "life_safety": True}, "analyzed", fire_reply_ok, True),
+        ({"outcome": "analyzed", "life_safety": True}, "analyzed", fire_reply_bad, False),
+        ({"outcome": "analyzed", "life_safety": True}, "analyzed", fire_reply_fallback, True),
+        ({"outcome": "analyzed", "types": ["water_damage"]}, "analyzed", water_reply, True),
         ({"outcome": "rejected"}, "rejected", None, True),
         ({"outcome": "rejected"}, "analyzed", water, False),
         ({"outcome": "analyzed", "types": ["water_damage"]}, "rejected", None, False),
@@ -304,6 +399,23 @@ def check(cases: list[dict[str, Any]]) -> int:
         got_pass, reason = judge({"expect": expect}, outcome, analysis)
         assert got_pass is should_pass, \
             f"scorer scenario {i} ({expect} / {outcome}): got {got_pass}, want {should_pass} — {reason}"
+
+    # Rejection-trail scenarios (product pass): a rejection observed live must
+    # carry a persistable trail — ValidationError.to_dict() with status
+    # rejected and a non-empty audit. `None` = no trail info offered (judge
+    # can't demand one; keeps the scorer usable against older pipelines).
+    rejection_scenarios = [  # (rejection, should_pass)
+        ({"request_id": "req_x", "status": "rejected", "error": "text too short",
+          "audit": [{"step": "received"}, {"step": "validated"}, {"step": "rejected"}]}, True),
+        ({"request_id": "req_x", "status": "rejected", "error": "text too short",
+          "audit": []}, False),
+        (None, True),
+    ]
+    for i, (rejection, should_pass) in enumerate(rejection_scenarios):
+        got_pass, reason = judge({"expect": {"outcome": "rejected"}}, "rejected", None,
+                                 rejection=rejection)
+        assert got_pass is should_pass, \
+            f"rejection scenario {i}: got {got_pass}, want {should_pass} — {reason}"
 
     # Length-bound cases must actually sit on the right side of the validator's bounds.
     for case in cases:
@@ -316,8 +428,8 @@ def check(cases: list[dict[str, Any]]) -> int:
                 f"{case['id']}: text length {len(text)} would be rejected before classification"
 
     known = [c["id"] for c in cases if c.get("known_failing")]
-    print(f"check: {len(cases)} cases schema-clean, {len(scenarios)} scorer scenarios pass, "
-          f"length bounds verified")
+    print(f"check: {len(cases)} cases schema-clean, {len(scenarios)} scorer + "
+          f"{len(rejection_scenarios)} rejection scenarios pass, length bounds verified")
     print(f"check: known_failing = {known if known else 'none'}")
     return 0
 

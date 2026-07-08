@@ -9,6 +9,7 @@
       "outcome": "'analyzed' (pipeline returns an Analysis) or 'rejected' (deterministic ValidationError)",
       "types": "optional list of acceptable request_type values; empty/absent = any type acceptable",
       "escalate": "optional bool: escalate_to_human must equal this exactly",
+      "life_safety": "optional bool: the analysis's life_safety flag must equal this exactly (deterministic life-safety screen)",
       "pass_if_escalated": "optional bool: if the request is routed to a human, that counts as a pass regardless of the type check (for cases where human triage is a correct answer)"
     },
     "known_failing": "true = expected failure under the current agent (xfail); suite stays green, flips loudly to XPASS once fixed",
@@ -103,11 +104,39 @@
     {
       "id": "urgency-active-fire",
       "category": "urgency",
-      "why": "SPRINT-mandated life-safety case: an in-progress fire must at least classify as fire_smoke_damage. (The pipeline has no life-safety urgency tier today — that gap is documented in evals/README.md, not asserted here.)",
+      "why": "Life-safety case: an in-progress fire must classify as fire_smoke_damage AND trip the deterministic life-safety screen — flag set, human escalation forced, no model call involved in that decision. Live runs also exercise the reply gate: the scorer's global invariant fails any drafted life-safety reply that does not open with the 911 line.",
       "text": "Our house is actively on fire right now, there are flames coming out of the kitchen and smoke everywhere. What do we do??",
       "expect": {
         "outcome": "analyzed",
-        "types": ["fire_smoke_damage"]
+        "types": ["fire_smoke_damage"],
+        "escalate": true,
+        "life_safety": true
+      },
+      "known_failing": false,
+      "diagnosis": null
+    },
+    {
+      "id": "life-safety-gas-leak-co",
+      "category": "urgency",
+      "why": "Gas + carbon monoxide phrasing: the taxonomy has no gas category, so the type read is unconstrained — what matters is the deterministic life-safety flag and forced human escalation. Live runs also exercise the reply gate's 911-opener invariant.",
+      "text": "We can smell gas in the kitchen and the carbon monoxide alarm just went off — the whole family is feeling dizzy. Can you send someone?",
+      "expect": {
+        "outcome": "analyzed",
+        "escalate": true,
+        "life_safety": true
+      },
+      "known_failing": false,
+      "diagnosis": null
+    },
+    {
+      "id": "life-safety-negative-past-fire",
+      "category": "urgency",
+      "why": "Over-trigger guard: a past fire needing soot cleanup is routine intake — the life-safety screen must stay quiet on past-tense phrasing.",
+      "text": "We had a grease fire two weeks ago; the kitchen is charred and it still smells like smoke when it rains. We need the soot cleaned up and the cabinets assessed.",
+      "expect": {
+        "outcome": "analyzed",
+        "types": ["fire_smoke_damage"],
+        "life_safety": false
       },
       "known_failing": false,
       "diagnosis": null
