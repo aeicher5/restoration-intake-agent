@@ -11,6 +11,22 @@ Started as a **one-hour live build**, then extended the same evening by
 method is documented in [ORCHESTRATION.md](ORCHESTRATION.md); the system
 design and its path to production scale in [ARCHITECTURE.md](ARCHITECTURE.md).
 
+## Start here
+
+- **The regression story** — the bug deliberately left in after the first hour
+  (*"nuclear material has spilled all over our yard"* → a **confident** wrong read that
+  sailed past every confidence gate) and how it was killed at the deterministic layer:
+  [evals/README.md → Known failing](evals/README.md#known-failing).
+- **How it was built** — three parallel agents, disjoint file lanes, zero merge
+  conflicts, one evening: [ORCHESTRATION.md](ORCHESTRATION.md).
+- **The doctrine** — *escalation protects against uncertainty, not miscalibration*;
+  that's why safety-critical routing is deterministic code ahead of any model call:
+  [ARCHITECTURE.md → Design principles](ARCHITECTURE.md#design-principles-locked-in-the-original-build-kept-tonight).
+
+![Admin detail view: one request's full audit trail](docs/admin-detail.png)
+*The admin detail view: one request's full audit trail — validation, hazard screen,
+model attempts with token usage, the confidence gate, and where it ended up.*
+
 ## Quickstart
 
 ```bash
@@ -30,6 +46,7 @@ python3 evals/run_extended.py --check          # extended suite schema/scorer ch
 
 ```bash
 pip install -r requirements.txt
+python3 demo.py           # seed the admin view: 5 archetypal requests through the live pipeline
 python3 web.py            # http://localhost:8080 — intake at /, audit trail at /admin
 ```
 
@@ -46,6 +63,7 @@ docker run --rm restoration-intake             # runs the offline selftest
 |---|---|
 | `agent.py` | The pipeline: validation → hazard screen → LLM classification (Haiku, Sonnet fallback, Opus reread) → escalation → audit trail. Selftest, evals, and a stdlib dev server included |
 | `web.py`, `templates/` | FastAPI web layer + JSONL audit persistence |
+| `demo.py` | Seed the admin view: 5 archetypal requests through the live pipeline |
 | `evals/` | Extended eval suite, runner, and live results ([evals/README.md](evals/README.md)) |
 | `Dockerfile` | python-slim image, selftest as default CMD |
 | `ARCHITECTURE.md` | How the system works and what changes at scale |
