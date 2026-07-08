@@ -51,6 +51,16 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_AUDIT_LOG = BASE_DIR / "audit_log.jsonl"
 WEB_PORT = int(os.environ.get("INTAKE_WEB_PORT", "8080"))
 
+# USD per 1M tokens (input, output) — platform.claude.com/docs/en/pricing,
+# checked 2026-07-08. claude-sonnet-5 has introductory pricing ($2/$10) through
+# 2026-08-31; the standard rate is hardcoded so estimates stay valid after it
+# lapses. Models missing from this table are counted but reported as unpriced.
+MODEL_PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
+    "claude-haiku-4-5": (1.00, 5.00),
+    "claude-sonnet-5": (3.00, 15.00),
+    "claude-opus-4-8": (5.00, 25.00),
+}
+
 
 # ------------------------------------------------------------------ audit store
 
@@ -120,6 +130,49 @@ def make_record(analysis_dict: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def iter_usage(node: Any) -> "list[tuple[str | None, int, int]]":
+    """Collect (model, input_tokens, output_tokens) for every usage blob
+    anywhere in a record's audit trail.
+
+    Walks the structure generically rather than naming steps, so token usage
+    recorded by future pipeline stages (reply drafts, critic reviews, ...)
+    is priced with no changes here. The model is whatever model-ish key sits
+    beside the usage blob.
+    """
+    found: list[tuple[str | None, int, int]] = []
+    if isinstance(node, dict):
+        usage = node.get("usage")
+        if isinstance(usage, dict) and ("input_tokens" in usage or "output_tokens" in usage):
+            model = node.get("model") or node.get("escalation_model") or node.get("model_used")
+            found.append((model,
+                          int(usage.get("input_tokens") or 0),
+                          int(usage.get("output_tokens") or 0)))
+        for value in node.values():
+            found.extend(iter_usage(value))
+    elif isinstance(node, list):
+        for item in node:
+            found.extend(iter_usage(item))
+    return found
+
+
+def request_cost(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Price one request's model calls against MODEL_PRICES_PER_MTOK."""
+    usd = 0.0
+    tokens_in = tokens_out = 0
+    unpriced: set[str] = set()
+    for model, tin, tout in iter_usage(record.get("audit", [])):
+        tokens_in += tin
+        tokens_out += tout
+        prices = MODEL_PRICES_PER_MTOK.get(model or "")
+        if prices is None:
+            if model:
+                unpriced.add(model)
+            continue
+        usd += tin * prices[0] / 1e6 + tout * prices[1] / 1e6
+    return {"usd": usd, "tokens_in": tokens_in, "tokens_out": tokens_out,
+            "unpriced": unpriced}
+
+
 def escalation_path(record: Mapping[str, Any]) -> str:
     """One-line, human-readable routing path reconstructed from the audit trail:
     which models were attempted, whether each succeeded, and where the request
@@ -182,8 +235,22 @@ def _pretty_json(value: Any) -> str:
     return json.dumps(value, indent=2, ensure_ascii=False)
 
 
+def _format_usd(value: Any) -> str:
+    """Auto-compact dollars: $0 / $0.0042 (sub-cent) / $1.27."""
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if amount == 0:
+        return "$0"
+    if amount < 0.01:
+        return f"${amount:.4f}"
+    return f"${amount:.2f}"
+
+
 templates.env.filters["ts"] = _format_timestamp
 templates.env.filters["pretty"] = _pretty_json
+templates.env.filters["usd"] = _format_usd
 
 
 # ---------------------------------------------------------------------- routes
@@ -232,16 +299,53 @@ def intake_submit(request: Request, text: str = Form("")) -> HTMLResponse:
     )
 
 
+def build_stats(records: "list[dict[str, Any]]") -> dict[str, Any]:
+    """Aggregate the stats strip from the audit store, attaching each record's
+    cost as record['cost_usd'] for the per-row column on the way through."""
+    total = len(records)
+    escalated = sum(1 for r in records if r.get("escalate_to_human"))
+    # A reread happened iff the finalized step carries token usage — the only
+    # call whose usage is recorded there is the escalation-model reread.
+    rereads = sum(
+        1 for r in records
+        if any(s.get("step") == "finalized" and "usage" in s for s in r.get("audit", []))
+    )
+
+    cost_total = 0.0
+    tokens_in = tokens_out = 0
+    unpriced: set[str] = set()
+    type_counts: dict[str, int] = {}
+    for record in records:
+        cost = request_cost(record)
+        record["cost_usd"] = cost["usd"]
+        cost_total += cost["usd"]
+        tokens_in += cost["tokens_in"]
+        tokens_out += cost["tokens_out"]
+        unpriced |= cost["unpriced"]
+        label = str(record.get("request_type", "unknown")).replace("_", " ")
+        type_counts[label] = type_counts.get(label, 0) + 1
+
+    return {
+        "total": total,
+        "escalated": escalated,
+        "escalation_rate": (escalated / total) if total else 0.0,
+        "rereads": rereads,
+        "avg_confidence": (sum(r.get("confidence", 0.0) for r in records) / total) if total else 0.0,
+        "cost_total": cost_total,
+        "cost_avg": (cost_total / total) if total else 0.0,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "unpriced": sorted(unpriced),
+        "type_mix": sorted(type_counts.items(), key=lambda kv: (-kv[1], kv[0])),
+    }
+
+
 @app.get("/admin", response_class=HTMLResponse)
 def admin_list(request: Request) -> HTMLResponse:
     records = STORE.list_newest_first()
-    stats = {
-        "total": len(records),
-        "escalated": sum(1 for r in records if r.get("escalate_to_human")),
-    }
     return templates.TemplateResponse(
         request, "admin.html",
-        {"active": "admin", "records": records, "stats": stats},
+        {"active": "admin", "records": records, "stats": build_stats(records)},
     )
 
 

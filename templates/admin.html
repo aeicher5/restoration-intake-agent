@@ -3,9 +3,49 @@
 {% block width %}960px{% endblock %}
 {% block content %}
 <h1>Processed requests</h1>
-<p class="sub">Read from the audit store, newest first.
-{% if stats.total %}{{ stats.total }} total · {{ stats.escalated }} flagged for human review.{% endif %}
-Click a row for the full audit trail.</p>
+<p class="sub">Read from the audit store, newest first. Click a row for the full audit trail.</p>
+
+{% if stats.total %}
+<div class="stats-strip">
+  <div class="stat">
+    <span class="stat-label">Requests</span>
+    <span class="stat-value">{{ stats.total }}</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">Escalation rate</span>
+    <span class="stat-value">{{ "%.0f"|format(stats.escalation_rate * 100) }}%</span>
+    <span class="stat-sub">{{ stats.escalated }} of {{ stats.total }} to human review</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">Opus rereads</span>
+    <span class="stat-value">{{ stats.rereads }}</span>
+    <span class="stat-sub">low-confidence second opinions</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">Avg confidence</span>
+    <span class="stat-value">{{ "%.2f"|format(stats.avg_confidence) }}</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">Est. cost</span>
+    <span class="stat-value">{{ stats.cost_total | usd }}</span>
+    <span class="stat-sub">{{ stats.cost_avg | usd }} per request</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">Tokens</span>
+    <span class="stat-value">{{ "{:,}".format(stats.tokens_in + stats.tokens_out) }}</span>
+    <span class="stat-sub">{{ "{:,}".format(stats.tokens_in) }} in · {{ "{:,}".format(stats.tokens_out) }} out</span>
+  </div>
+</div>
+<div class="type-mix">
+  <span class="stat-label">Type mix</span>
+  {% for label, count in stats.type_mix %}
+  <span class="chip">{{ label }} <b>×{{ count }}</b></span>
+  {% endfor %}
+  {% if stats.unpriced %}
+  <span class="stat-sub">unpriced models excluded from cost: {{ stats.unpriced | join(", ") }}</span>
+  {% endif %}
+</div>
+{% endif %}
 
 <div class="table-wrap">
 {% if records %}
@@ -17,6 +57,7 @@ Click a row for the full audit trail.</p>
       <th>Type</th>
       <th>Conf.</th>
       <th>Routing</th>
+      <th>Cost</th>
       <th>Customer text</th>
     </tr>
   </thead>
@@ -34,6 +75,7 @@ Click a row for the full audit trail.</p>
         <span class="badge auto">auto</span>
         {% endif %}
       </td>
+      <td class="conf">{{ r.cost_usd | usd }}</td>
       <td>{{ r.raw_text[:90] }}{% if r.raw_text|length > 90 %}…{% endif %}</td>
     </tr>
     {% endfor %}
