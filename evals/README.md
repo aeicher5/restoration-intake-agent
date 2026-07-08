@@ -49,7 +49,9 @@ runs — both inside its accepted set, and it escalates to a human either way).
 | garbage-gibberish | robustness | PASS | any + escalate | general_inquiry | 0.05 | yes | 4.2s |
 | multi-hazard-flood-smoke | multi-hazard | PASS | water_damage / fire_smoke_damage | water_damage | 0.72 | no | 1.7s |
 | multi-hazard-storm-roof-rain | multi-hazard | PASS | storm_damage / water_damage | storm_damage | 0.95 | no | 1.2s |
-| urgency-active-fire | urgency | PASS | fire_smoke_damage | fire_smoke_damage | 0.99 | no | 2.4s |
+| urgency-active-fire | urgency | not re-run† | fire_smoke_damage + escalate + life-safety | — | — | — | — |
+| life-safety-gas-leak-co | urgency | not run† | any + escalate + life-safety | — | — | — | — |
+| life-safety-negative-past-fire | urgency | not run† | fire_smoke_damage, life-safety must stay off | — | — | — | — |
 | ambiguous-low-signal | ambiguity | PASS | mold_remediation / general_inquiry / unknown (or human) | general_inquiry | 0.35 | yes | 4.9s |
 | narrative-rambling-slow-leak | narrative | PASS | water_damage / mold_remediation | water_damage | 0.95 | no | 1.9s |
 | out-of-scope-lawn-care | out-of-scope | PASS | general_inquiry (or human) | general_inquiry | 0.98 | no | 1.2s |
@@ -58,7 +60,12 @@ runs — both inside its accepted set, and it escalates to a human either way).
 | robustness-instruction-injection | robustness | PASS | water_damage | water_damage | 0.99 | no | 1.0s |
 | language-spanish-flood | language | PASS | water_damage | water_damage | 0.99 | no | 1.0s |
 
-**Summary:** expectations met 15/15 (PASS 15, FAIL 0, XFAIL 0, XPASS 0) — suite green.
+† 2026-07-08 product pass: the deterministic life-safety tier landed after the run above.
+`urgency-active-fire`'s expectation was tightened (it must now also trip the life-safety flag
+and force human escalation) and two life-safety cases were added; none of the three has been
+re-run live yet — rows above show expectations only. Offline `--check` covers the scorer.
+
+**Summary (of the pre-life-safety run):** expectations met 15/15 (PASS 15, FAIL 0, XFAIL 0, XPASS 0) — suite green.
 Over the 13 analyzed cases: avg confidence 0.83, escalated to human 4/13, escalation-model
 (Opus) rereads 2, avg latency 1.7s. Escalations rose from 2/13 pre-fix to 4/13 because
 hazard-screened requests always route to a human — by design. Both hazard cases now resolve
@@ -88,7 +95,9 @@ None. One case was known-failing when this suite was written; the record is kept
   correctly as `biohazard_cleanup` even pre-fix; the failure was specific to nuclear/radioactive
   phrasing (and possibly the "can you clean this up?" question form pulling toward
   `general_inquiry`). Post-fix, both resolve at the deterministic tier without an API call.
-- **Product gap, not asserted by any eval:** an actively-burning-house request classifies
-  correctly (`fire_smoke_damage`, 0.99) but nothing in the pipeline flags life safety or says
-  "call 911 first" — there is no urgency tier in the schema. Left as a documented backlog item so
-  the eval doesn't invent requirements the system never had.
+- **Product gap, closed 2026-07-08 (product pass):** an actively-burning-house request used to
+  classify correctly (`fire_smoke_damage`, 0.99) with nothing flagging life safety. The pipeline
+  now runs a deterministic life-safety screen (active fire / gas leak / carbon monoxide /
+  smoke-right-now / 911 phrasing, word-boundary matched, zero API calls) ahead of classification:
+  it sets `life_safety` on the analysis, forces human escalation, and classification still runs
+  normally. The urgency cases above assert it; past-tense fire damage must stay unflagged.

@@ -231,6 +231,9 @@ class Analysis:
 
     `audit` is the stage-3 data layer: a JSON-able record of the values at each
     pipeline step, appended as the request moves through.
+
+    `life_safety` is set by the deterministic life-safety screen (never by the
+    LLM); True always implies escalate_to_human=True.
     """
 
     request_id: str
@@ -238,6 +241,7 @@ class Analysis:
     confidence: float
     escalate_to_human: bool
     notes: str
+    life_safety: bool = False
     audit: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -328,6 +332,40 @@ def scan_hazard_terms(text: str) -> list[str]:
                   if pattern.search(lowered))
 
 
+# Life-safety vocabulary for the urgency screen, label -> word-boundary pattern
+# (matched against normalized lowercase text), same shape as the hazard screen
+# above. Active-emergency phrasing only: past-tense damage reports ("we had a
+# fire", "smells like smoke") are routine intake and must stay quiet, but a
+# false positive on an active read still only costs one human review — bias
+# toward over-triggering within the present-tense phrasings.
+LIFE_SAFETY_TERM_PATTERNS: "dict[str, re.Pattern[str]]" = {
+    label: re.compile(pattern)
+    for label, pattern in {
+        "active_fire": r"\bon fire\b|\bflames?\b|\bburning\b|\bfire is spreading\b",
+        "active_smoke": r"\bsmoke is\b|\bfilling with smoke\b|\bfull of smoke\b",
+        "gas_leak": r"\bsmell\w* gas\b|\bgas (?:is )?leak\w*\b|\bgas smell\b|\bgas odou?r\b",
+        "carbon_monoxide": r"\bcarbon monoxide\b|\bco (?:alarm|detector)s?\b",
+        "emergency_911": r"\b911\b",
+    }.items()
+}
+
+
+def scan_life_safety_terms(text: str) -> list[str]:
+    """Deterministic life-safety screen (product pass): active fire, gas leak,
+    carbon monoxide, smoke-right-now, 911 phrasing.
+
+    Runs ahead of the LLM call and never depends on one: a match sets the
+    analysis's `life_safety` flag and forces escalate_to_human=True, while
+    classification still proceeds normally (the request type is a separate
+    question from "someone may be in danger right now"). A burning-house
+    request must never depend on a model call to say "call 911".
+    Returns the sorted matched labels (empty when clean) for the audit trail.
+    """
+    lowered = normalize_text(text).lower()
+    return sorted(label for label, pattern in LIFE_SAFETY_TERM_PATTERNS.items()
+                  if pattern.search(lowered))
+
+
 # ------------------------------------------------------------------- llm classification
 
 # The LLM only ever picks from the real categories — UNKNOWN is reserved for our
@@ -394,6 +432,10 @@ class IntakeAgent:
         area = scan_service_area_mentions(request.raw_text)
         self._record(trail, "service_area", **area)
 
+        life_safety_terms = scan_life_safety_terms(request.raw_text)
+        self._record(trail, "life_safety_screen", matched_terms=life_safety_terms,
+                     triggered=bool(life_safety_terms))
+
         hazard_terms = scan_hazard_terms(request.raw_text)
         self._record(trail, "hazard_screen", matched_terms=hazard_terms,
                      triggered=bool(hazard_terms))
@@ -426,6 +468,12 @@ class IntakeAgent:
         )
 
         analysis, finalize_detail = self._finalize(request, analysis)
+        if life_safety_terms:
+            # Code-owned enforcement, applied to whatever object leaves the
+            # confidence gate (a reread builds a fresh Analysis): a life-safety
+            # request always reaches a human, whatever the model said.
+            analysis.life_safety = True
+            analysis.escalate_to_human = True
         self._assert_invariants(request, analysis)
         self._record(
             trail,
@@ -433,6 +481,7 @@ class IntakeAgent:
             request_type=analysis.request_type.value,
             confidence=analysis.confidence,
             escalate_to_human=analysis.escalate_to_human,
+            life_safety=analysis.life_safety,
             confidence_threshold=self.settings.confidence_threshold,
             **finalize_detail,
         )
@@ -488,6 +537,12 @@ class IntakeAgent:
         )
         assert isinstance(analysis.escalate_to_human, bool), (
             f"escalate_to_human must be bool, got {type(analysis.escalate_to_human).__name__}"
+        )
+        assert analysis.life_safety in (True, False), (
+            f"life_safety must be bool, got {analysis.life_safety!r}"
+        )
+        assert not analysis.life_safety or analysis.escalate_to_human, (
+            "life_safety=True must always carry escalate_to_human=True"
         )
 
     def _create_with_retry(self, **kwargs: Any) -> "tuple[Any, int]":
@@ -946,6 +1001,25 @@ def selftest() -> int:
     assert scan_hazard_terms("black mold behind the tile and a musty smell") == []  # mold-tier, not hazmat
     assert scan_hazard_terms("the source of the leak is unclear to us") == []       # no substring tricks
 
+    # life-safety screen: active-emergency phrasing, deterministic (product pass).
+    # Past-tense fire/smoke damage is routine intake and must NOT trigger — the
+    # built-in eval texts below are the canonical negatives.
+    assert scan_life_safety_terms("Our house is ON FIRE right now!") == ["active_fire"]
+    assert scan_life_safety_terms("there are flames coming out of the kitchen") == ["active_fire"]
+    assert scan_life_safety_terms("the attic is still burning a little") == ["active_fire"]
+    assert scan_life_safety_terms("we smell gas near the water heater") == ["gas_leak"]
+    assert scan_life_safety_terms("I think the gas is leaking behind the stove") == ["gas_leak"]
+    assert scan_life_safety_terms("our carbon monoxide detector keeps going off") == ["carbon_monoxide"]
+    assert scan_life_safety_terms("the CO alarm went off twice tonight") == ["carbon_monoxide"]
+    assert scan_life_safety_terms("smoke is filling the hallway, should we call 911?") == \
+        ["active_smoke", "emergency_911"]
+    assert scan_life_safety_terms(SAMPLE_REQUEST) == []
+    assert scan_life_safety_terms("Grease fire in the kitchen last night, whole house "
+                                  "smells like smoke and there's soot on the ceiling.") == []
+    assert scan_life_safety_terms("We had an electrical fire in the garage, everything "
+                                  "in there is charred and smells like smoke.") == []
+    assert scan_life_safety_terms("the flamespray coating co. redid our deck") == []  # no substring tricks
+
     # --- LLM classification (stage 4), exercised via a fake client — no network ---
 
     class _FakeTextBlock:
@@ -1022,6 +1096,63 @@ def selftest() -> int:
     finalized_step = next(s for s in analysis.audit if s["step"] == "finalized")
     assert finalized_step["escalate_to_human"] is True, finalized_step
     json.dumps(analysis.to_dict())  # deterministic path must stay JSON-serializable too
+
+    # --- Life-safety screen (product pass): flag + forced human escalation, ---
+    # --- while the LLM still classifies the request type normally           ---
+
+    calls = []
+
+    def fire_read(**kwargs):
+        calls.append(kwargs["model"])
+        return _json_response("fire_smoke_damage", 0.97, "Active structure fire reported.")
+
+    agent_fire = IntakeAgent(settings, client=_FakeClient(fire_read))
+    analysis = agent_fire.handle("Our house is on fire right now, flames in the kitchen!")
+    assert analysis.life_safety is True
+    assert analysis.escalate_to_human is True, "life safety must force human escalation"
+    assert analysis.request_type is RequestType.FIRE_SMOKE_DAMAGE, "LLM classification must still run"
+    assert calls == [settings.primary_model], calls
+    ls_step = next(s for s in analysis.audit if s["step"] == "life_safety_screen")
+    assert ls_step["triggered"] is True and "active_fire" in ls_step["matched_terms"], ls_step
+    finalized_step = next(s for s in analysis.audit if s["step"] == "finalized")
+    assert finalized_step["life_safety"] is True and finalized_step["escalate_to_human"] is True
+    assert analysis.to_dict()["life_safety"] is True
+    json.dumps(analysis.to_dict())
+
+    # no life-safety phrasing -> flag stays False, nothing forced, step still recorded
+    analysis = agent_ok.handle(SAMPLE_REQUEST)
+    assert analysis.life_safety is False and analysis.escalate_to_human is False
+    ls_step = next(s for s in analysis.audit if s["step"] == "life_safety_screen")
+    assert ls_step["triggered"] is False and ls_step["matched_terms"] == [], ls_step
+    assert analysis.to_dict()["life_safety"] is False
+
+    # the flag survives a low-confidence escalation reread (which builds a fresh
+    # Analysis) — enforcement applies to whatever object leaves the pipeline
+    def low_fire_then_resolved(**kwargs):
+        if kwargs["model"] == settings.escalation_model:
+            return _json_response("fire_smoke_damage", 0.93, "Escalated read: active fire.")
+        return _json_response("fire_smoke_damage", 0.4, "Uncertain primary read.")
+
+    agent_fire_low = IntakeAgent(settings, client=_FakeClient(low_fire_then_resolved))
+    analysis = agent_fire_low.handle("Smoke is everywhere upstairs and we can smell gas!")
+    assert analysis.life_safety is True and analysis.escalate_to_human is True
+    assert analysis.confidence == 0.93, "reread result must be kept, flag applied on top"
+    ls_step = next(s for s in analysis.audit if s["step"] == "life_safety_screen")
+    assert ls_step["matched_terms"] == ["active_smoke", "gas_leak"], ls_step
+
+    # life-safety + hazmat co-trigger: hazard short-circuit owns classification
+    # (zero LLM calls), and the life-safety flag is still set on the result
+    calls = []
+
+    def must_not_be_used(**kwargs):
+        calls.append(kwargs["model"])
+        return _json_response("water_damage", 0.99, "This read must never be used.")
+
+    agent_both = IntakeAgent(settings, client=_FakeClient(must_not_be_used))
+    analysis = agent_both.handle("There's a gas leak and chemical fumes are filling the basement")
+    assert analysis.request_type is RequestType.BIOHAZARD_CLEANUP
+    assert analysis.life_safety is True and analysis.escalate_to_human is True
+    assert calls == [], f"hazard+life-safety request must not reach the LLM: {calls}"
 
     # primary model fails -> falls back to the secondary model
     calls = []
@@ -1245,8 +1376,9 @@ def selftest() -> int:
             server.shutdown()
             server.server_close()
 
-    print("selftest: all checks passed (deterministic layer, hazard screen, LLM "
-          "classification, retry/backoff, confidence escalation, web handlers)")
+    print("selftest: all checks passed (deterministic layer, hazard + life-safety "
+          "screens, LLM classification, retry/backoff, confidence escalation, "
+          "web handlers)")
     return 0
 
 
