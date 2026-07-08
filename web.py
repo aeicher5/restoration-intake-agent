@@ -10,6 +10,10 @@ Two server-rendered surfaces on one FastAPI app (templates/ holds the HTML):
                           model attempts, confidence, escalation path
     GET  /health          JSON liveness + masked config summary
 
+Both /admin views are open on localhost by default; set ADMIN_TOKEN to require
+a token (?token=... once, then a cookie). The token value is never logged —
+uvicorn's access line is redacted before it is emitted.
+
 agent.py is imported, never modified. It returns each request's audit trail on
 the Analysis object but persists nothing, so this module adds the missing
 piece: AuditStore, an append-only JSONL file (audit_log.jsonl next to this
@@ -20,10 +24,13 @@ arrives.
 Usage:
     pip install -r requirements.txt
     python3 web.py                          # http://localhost:8080
-    INTAKE_WEB_PORT=9000 python3 web.py     # pick another port
+    PORT=9000 python3 web.py                # pick another port (INTAKE_WEB_PORT
+                                            # also honored; PORT wins)
+    ADMIN_TOKEN=... python3 web.py          # gate /admin views behind the token
     uvicorn web:app --reload --port 8080    # dev auto-reload
 """
 
+import hmac
 import json
 import logging
 import os
@@ -35,7 +42,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from agent import (
@@ -50,7 +57,13 @@ log = logging.getLogger("intake.web")
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_AUDIT_LOG = BASE_DIR / "audit_log.jsonl"
-WEB_PORT = int(os.environ.get("INTAKE_WEB_PORT", "8080"))
+# PORT is the deploy-platform convention and wins; INTAKE_WEB_PORT remains as
+# the documented local override from earlier revisions.
+WEB_PORT = int(os.environ.get("PORT", os.environ.get("INTAKE_WEB_PORT", "8080")))
+
+# Unset (the default) leaves /admin open — the original localhost posture.
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+ADMIN_TOKEN_COOKIE = "intake_admin_token"
 
 # USD per 1M tokens (input, output) — platform.claude.com/docs/en/pricing,
 # checked 2026-07-08. claude-sonnet-5 has introductory pricing ($2/$10) through
@@ -240,6 +253,30 @@ logging.basicConfig(
     stream=sys.stderr,
     format="%(levelname)s %(name)s: %(message)s",
 )
+
+
+class _TokenRedactingFilter(logging.Filter):
+    """uvicorn's access line includes the query string, which would leak
+    ?token= values into logs. Redact them before the record is emitted.
+    Attached at logger level so it survives uvicorn's dictConfig (which
+    replaces handlers but leaves logger filters alone)."""
+
+    _TOKEN_RE = re.compile(r"(token=)[^&\s\"']*")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                self._TOKEN_RE.sub(r"\1[redacted]", arg) if isinstance(arg, str) else arg
+                for arg in record.args
+            )
+        if isinstance(record.msg, str):
+            record.msg = self._TOKEN_RE.sub(r"\1[redacted]", record.msg)
+        return True
+
+
+for _logger_name in ("uvicorn.access", "uvicorn.error", "intake.web"):
+    logging.getLogger(_logger_name).addFilter(_TokenRedactingFilter())
+
 load_env()
 try:
     SETTINGS = Settings.from_env()
@@ -280,6 +317,43 @@ def _format_usd(value: Any) -> str:
 templates.env.filters["ts"] = _format_timestamp
 templates.env.filters["pretty"] = _pretty_json
 templates.env.filters["usd"] = _format_usd
+
+
+# ------------------------------------------------------------------ admin auth
+
+_ADMIN_DENIED_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Admin — token required</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+background:#f4f4f2;color:#1e2226;display:grid;place-items:center;min-height:100vh;margin:0}
+.card{background:#fff;border:1px solid #dde1e5;border-radius:10px;padding:1.5rem 2rem;
+max-width:26rem}h1{font-size:1.05rem;margin:0 0 .4rem}p{margin:.3rem 0;color:#5b6570;
+font-size:.9rem}code{font-family:ui-monospace,Menlo,monospace;background:#f6f8fa;
+padding:.1rem .3rem;border-radius:4px}</style></head>
+<body><div class="card"><h1>Admin access requires a token</h1>
+<p>This deployment gates the admin views. Open
+<code>/admin?token=&lt;ADMIN_TOKEN&gt;</code> once — a cookie keeps you signed
+in after that.</p></div></body></html>"""
+
+
+def _admin_guard(request: Request) -> "Response | None":
+    """None = allowed. With ADMIN_TOKEN set, a correct ?token= sets the auth
+    cookie and 303-redirects to the same path so the token drops out of the
+    URL (and browser history); after that the cookie alone authorizes. A
+    wrong or missing credential gets the 403 page. Unset ADMIN_TOKEN keeps
+    the open-localhost default. Comparisons are constant-time; the token
+    value itself is never logged (see _TokenRedactingFilter)."""
+    if not ADMIN_TOKEN:
+        return None
+    supplied = request.query_params.get("token")
+    if supplied is not None:
+        if hmac.compare_digest(supplied, ADMIN_TOKEN):
+            response = RedirectResponse(request.url.path, status_code=303)
+            response.set_cookie(ADMIN_TOKEN_COOKIE, ADMIN_TOKEN, httponly=True,
+                                samesite="lax", path="/admin")
+            return response
+    elif hmac.compare_digest(request.cookies.get(ADMIN_TOKEN_COOKIE, ""), ADMIN_TOKEN):
+        return None
+    return HTMLResponse(_ADMIN_DENIED_HTML, status_code=403)
 
 
 # ---------------------------------------------------------------------- routes
@@ -370,7 +444,10 @@ def build_stats(records: "list[dict[str, Any]]") -> dict[str, Any]:
 
 
 @app.get("/admin", response_class=HTMLResponse)
-def admin_list(request: Request) -> HTMLResponse:
+def admin_list(request: Request) -> Response:
+    denied = _admin_guard(request)
+    if denied is not None:
+        return denied
     records = STORE.list_newest_first()
     return templates.TemplateResponse(
         request, "admin.html",
@@ -379,7 +456,10 @@ def admin_list(request: Request) -> HTMLResponse:
 
 
 @app.get("/admin/{request_id}", response_class=HTMLResponse)
-def admin_detail(request: Request, request_id: str) -> HTMLResponse:
+def admin_detail(request: Request, request_id: str) -> Response:
+    denied = _admin_guard(request)
+    if denied is not None:
+        return denied
     record = STORE.get(request_id)
     if record is None:
         return templates.TemplateResponse(
