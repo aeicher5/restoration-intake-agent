@@ -1,0 +1,48 @@
+# CI for the restoration-intake agent — fully offline by design.
+#
+# The selftest drives the whole pipeline through a fake in-process client, the
+# eval check validates the cases file and scorer without network, and the web
+# import smoke uses a placeholder key (web.py fails fast at import when config
+# is missing; importing it makes no network call). No repository secrets are
+# read anywhere in this workflow, and no live model call can occur.
+name: CI
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Pipeline selftest (offline, fake client)
+        run: python3 agent.py --selftest
+
+      - name: Extended evals — schema and scorer check (offline)
+        run: python3 evals/run_extended.py --check
+
+      - name: Web layer import smoke
+        # web.py fails fast at import without ANTHROPIC_API_KEY, so the import
+        # needs a value present — the placeholder below is not a real key and
+        # is never sent anywhere (import constructs the SDK client without
+        # making a network call). Deliberately not a repository secret.
+        env:
+          ANTHROPIC_API_KEY: ci-import-smoke-placeholder-not-a-real-key
+        run: python -c "import web"
