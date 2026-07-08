@@ -1,0 +1,133 @@
+# Promotion gate — the second CI job, for changes to the promotion surface.
+#
+# The always-on CI workflow (ci.yml) runs the offline suite on every push and
+# reads no secrets. THIS workflow exists for one reason: prompts and
+# thresholds are versioned artifacts (agent.PROMPT_CONFIG), and a change to
+# that surface — or to the eval suite that judges it — must not promote on
+# offline checks alone. So it triggers only on those paths, re-runs the
+# offline checks, and then runs the LIVE extended eval suite when it can:
+#
+#   - The live suite needs an `ANTHROPIC_API_KEY` repository secret. To
+#     configure it: repo Settings -> Secrets and variables -> Actions ->
+#     "New repository secret", name `ANTHROPIC_API_KEY`, value = an Anthropic
+#     API key with a small spend cap (a full run is ~20 cases, a few cents).
+#   - If the secret is NOT configured, the live job skips LOUDLY — a warning
+#     annotation and a step-summary notice with those instructions — instead
+#     of pretending green means live-verified. The offline gate still gates.
+#
+# Security posture:
+#   - The secret is referenced only as `${{ secrets.ANTHROPIC_API_KEY }}` in
+#     a step `env:`; it is never echoed, logged, or written to any file (the
+#     presence check below evaluates an expression to a literal true/false —
+#     the value itself never enters a shell command line).
+#   - Trigger is `push` only (no pull_request_target, no fork-supplied code
+#     runs with access to the secret).
+#   - Deterministic tiers stay zero-API-call: the offline job makes no
+#     network calls at all; only the live job spends.
+name: Promotion gate
+
+on:
+  push:
+    paths:
+      # The promotion surface: PROMPT_CONFIG (prompts + thresholds) lives in
+      # agent.py — any agent.py change is treated as a possible surface
+      # change (conservative superset; cheaper than false negatives).
+      - "agent.py"
+      # The judge itself: cases, scorer, runner, correction-ingest tooling.
+      - "evals/**"
+      # And this gate's own definition.
+      - ".github/workflows/promotion-gate.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promotion-gate-${{ github.ref }}
+  cancel-in-progress: true # a superseded push should not keep spending live-eval tokens
+
+jobs:
+  offline-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Report the promotion artifact under test
+        # Version + content fingerprint of PROMPT_CONFIG (never prompt text,
+        # never secrets) — importing agent.py makes no network call and needs
+        # no API key.
+        run: |
+          set -o pipefail # a failed import must fail the step, not exit with tee's 0
+          python3 -c "import agent, json; print(json.dumps(agent.PROMPT_CONFIG.summary(), indent=2))" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Pipeline selftest (offline, fake client)
+        run: python3 agent.py --selftest
+
+      - name: Extended evals — schema and scorer check (offline)
+        run: python3 evals/run_extended.py --check
+
+  live-extended-suite:
+    # Runs the full extended eval suite against the real API — the actual
+    # promotion evidence. Requires the ANTHROPIC_API_KEY repository secret
+    # (setup instructions in the header comment); skips loudly without it.
+    needs: offline-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check whether the ANTHROPIC_API_KEY secret is configured
+        id: livekey
+        # `secrets` is not usable in a job-level `if`, so evaluate the
+        # presence test into an env var (a literal "true"/"false" — the
+        # secret's value never appears) and gate the next steps on it.
+        env:
+          KEY_CONFIGURED: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+        run: echo "configured=${KEY_CONFIGURED}" >> "$GITHUB_OUTPUT"
+
+      - name: Live extended eval suite
+        if: steps.livekey.outputs.configured == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -o pipefail # a red suite must fail this step, not exit with tee's 0
+          python3 evals/run_extended.py --markdown | tee live-results.txt
+          {
+            echo "## Promotion gate: live extended suite"
+            echo ""
+            # The runner prints a Markdown results table at the end (--markdown);
+            # surface everything from the summary line down in the job summary.
+            sed -n '/^expectations met/,$p' live-results.txt
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Live suite SKIPPED — no ANTHROPIC_API_KEY secret configured
+        if: steps.livekey.outputs.configured != 'true'
+        run: |
+          {
+            echo "## Promotion gate: live suite SKIPPED"
+            echo ""
+            echo "The offline gate passed, but the LIVE extended eval suite did not run:"
+            echo "no \`ANTHROPIC_API_KEY\` repository secret is configured, so this push's"
+            echo "prompt/threshold/eval changes are **not live-verified**."
+            echo ""
+            echo "To enable: repo **Settings -> Secrets and variables -> Actions ->"
+            echo "New repository secret**, name \`ANTHROPIC_API_KEY\`. Then re-run this"
+            echo "workflow, or verify locally with \`python3 evals/run_extended.py\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning title=Live eval suite skipped::No ANTHROPIC_API_KEY repository secret configured — prompt/threshold changes in this push are not live-verified. See the job summary for setup instructions."
