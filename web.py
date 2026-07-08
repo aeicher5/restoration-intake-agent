@@ -51,11 +51,12 @@ from fastapi.templating import Jinja2Templates
 from agent import (
     ConfigError,
     IntakeAgent,
+    RequestType,
     Settings,
     ValidationError,
     load_env,
 )
-from escalations import EscalationWorkflow, is_workflow_event
+from escalations import EscalationWorkflow, WorkflowError, is_workflow_event
 
 log = logging.getLogger("intake.web")
 
@@ -543,6 +544,79 @@ def admin_list(request: Request) -> Response:
         request, "admin.html",
         {"active": "admin", "records": records, "stats": build_stats(records)},
     )
+
+
+# The human's decision vocabulary when resolving: the same closed enum the
+# classifier picks from, minus the pre-classification sentinel — a dispatcher
+# resolving a request must land it on a real type.
+RESOLVABLE_TYPES = [t.value for t in RequestType if t is not RequestType.UNKNOWN]
+
+# Post-action feedback rendered on the queue page. Actions redirect with
+# ?notice=<code> (never free text — codes only, so nothing user-controlled is
+# reflected); unknown codes render nothing.
+QUEUE_NOTICES = {
+    "acknowledged": ("ok", "Acknowledged — it stays in the queue until resolved."),
+    "resolved": ("ok", "Resolved — the decision is recorded in the request's audit trail."),
+    "already_acknowledged": ("warn", "Already acknowledged, likely by another dispatcher just now."),
+    "already_resolved": ("warn", "Already resolved, likely by another dispatcher just now — it has left the queue."),
+    "not_found": ("warn", "No such request in the audit store."),
+    "not_escalated": ("warn", "That request was never escalated — nothing to work."),
+    "bad_type": ("warn", "Resolving needs a valid request type — pick one from the list."),
+}
+
+
+# NOTE: registered before /admin/{request_id}, which would otherwise capture
+# the literal path segment "queue" as a request id.
+@app.get("/admin/queue", response_class=HTMLResponse)
+def admin_queue(request: Request) -> Response:
+    denied = _admin_guard(request)
+    if denied is not None:
+        return denied
+    entries = WORKFLOW.queue_entries()
+    counts = {
+        "open": sum(1 for e in entries if e["wf"]["state"] == "open"),
+        "acknowledged": sum(1 for e in entries if e["wf"]["state"] == "acknowledged"),
+        "life_safety": sum(1 for e in entries if e["wf"]["life_safety"]),
+    }
+    return templates.TemplateResponse(
+        request, "queue.html",
+        {"active": "queue", "entries": entries, "counts": counts,
+         "resolvable_types": RESOLVABLE_TYPES,
+         "notice": QUEUE_NOTICES.get(request.query_params.get("notice", ""))},
+    )
+
+
+def _queue_redirect(notice: str) -> RedirectResponse:
+    return RedirectResponse(f"/admin/queue?notice={notice}", status_code=303)
+
+
+@app.post("/admin/queue/{request_id}/ack")
+def admin_queue_ack(request: Request, request_id: str) -> Response:
+    denied = _admin_guard(request)
+    if denied is not None:
+        return denied
+    try:
+        WORKFLOW.acknowledge(request_id)
+    except WorkflowError as exc:
+        return _queue_redirect(exc.code)
+    return _queue_redirect("acknowledged")
+
+
+@app.post("/admin/queue/{request_id}/resolve")
+def admin_queue_resolve(request: Request, request_id: str,
+                        request_type: str = Form(""), note: str = Form("")) -> Response:
+    denied = _admin_guard(request)
+    if denied is not None:
+        return denied
+    if request_type not in RESOLVABLE_TYPES:
+        return _queue_redirect("bad_type")
+    try:
+        # The note is free text headed for an append-only audit line; cap it
+        # so a runaway paste can't bloat the store (form maxlength is 500).
+        WORKFLOW.resolve(request_id, request_type, note=note[:2000])
+    except WorkflowError as exc:
+        return _queue_redirect(exc.code)
+    return _queue_redirect("resolved")
 
 
 @app.get("/admin/{request_id}", response_class=HTMLResponse)

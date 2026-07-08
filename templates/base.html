@@ -89,6 +89,34 @@
                    font-variant-numeric: tabular-nums; }
   footer { max-width: 960px; margin: 2rem auto 2.5rem; padding: 0 1rem;
            color: #8a939c; font-size: .8rem; }
+  /* escalation queue */
+  .esc-card { background: #fff; border: 1px solid #dde1e5; border-radius: 10px;
+              padding: .9rem 1.1rem; margin-top: .9rem;
+              box-shadow: 0 1px 2px rgba(15, 23, 32, .04); }
+  .esc-card.life-safety { border-left: 4px solid #cf3f3f; background: #fffbfa; }
+  .esc-head { display: flex; flex-wrap: wrap; gap: .4rem .6rem; align-items: baseline; }
+  .esc-head .at { margin-left: auto; color: #8a939c; font-size: .8rem;
+                  font-variant-numeric: tabular-nums; }
+  .esc-text { margin: .55rem 0 .15rem; }
+  .esc-meta { margin: 0; color: #5b6570; font-size: .85rem; }
+  .esc-actions { display: flex; flex-wrap: wrap; gap: .5rem .75rem; margin-top: .75rem;
+                 align-items: center; }
+  .esc-actions form { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center;
+                      margin: 0; }
+  .esc-actions form.resolve { flex: 1 1 26rem; }
+  .esc-actions select, .esc-actions input[type=text] {
+    font: inherit; font-size: .85rem; padding: .4rem .55rem;
+    border: 1px solid #c6ccd2; border-radius: 8px; background: #fff; }
+  .esc-actions input[type=text] { flex: 1 1 12rem; min-width: 9rem; }
+  .esc-actions button { margin-top: 0; padding: .42rem 1rem; font-size: .85rem; }
+  button.secondary { background: #fff; color: #1e2226; border: 1px solid #c6ccd2; }
+  .chip.ack { background: #dbeafe; color: #1e3a8a; }
+  .chip.mini { font-size: .72rem; padding: .05rem .45rem; color: #5b6570; }
+  .badge.danger.pulse { animation: esc-pulse 1.6s ease-in-out infinite; }
+  @keyframes esc-pulse { 50% { opacity: .55; } }
+  .notice { margin-top: 1rem; padding: .6rem 1rem; border-radius: 8px; font-size: .9rem; }
+  .notice.ok { background: #d9f2e4; color: #14532d; border: 1px solid #b7e2cb; }
+  .notice.warn { background: #fde8cd; color: #8a4b00; border: 1px solid #f3d3a1; }
 </style>
 </head>
 <body>
@@ -97,6 +125,7 @@
     <span class="brand">Restoration Intake</span>
     <a href="/" {% if active == 'intake' %}class="on"{% endif %}>Customer intake</a>
     <a href="/admin" {% if active == 'admin' %}class="on"{% endif %}>Admin</a>
+    <a href="/admin/queue" {% if active == 'queue' %}class="on"{% endif %}>Queue</a>
   </nav>
 </header>
 <main>
