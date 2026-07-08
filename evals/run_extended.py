@@ -124,12 +124,14 @@ def case_text(case: dict[str, Any]) -> str:
 
 # ----------------------------------------------------------------------- scoring
 
-def judge(case: dict[str, Any], outcome: str,
-          analysis: "agent.Analysis | None") -> tuple[bool, str]:
+def judge(case: dict[str, Any], outcome: str, analysis: "agent.Analysis | None",
+          rejection: "dict[str, Any] | None" = None) -> tuple[bool, str]:
     """Score one observed result against the case's expectations.
 
-    Pure function of (case, outcome, analysis) so --check can exercise it
-    offline with synthetic Analysis objects.
+    Pure function of (case, outcome, analysis, rejection) so --check can
+    exercise it offline with synthetic inputs. `rejection` is the
+    ValidationError.to_dict() record when the pipeline rejected the request;
+    None means no trail info was offered (older pipelines).
     """
     expect = case["expect"]
     if outcome == "error":
@@ -137,6 +139,12 @@ def judge(case: dict[str, Any], outcome: str,
     if outcome != expect["outcome"]:
         return False, f"expected outcome={expect['outcome']}, got {outcome}"
     if outcome == "rejected":
+        # Product pass: rejections must be persistable — status rejected and a
+        # finished (non-empty) audit trail on the exception record.
+        if rejection is not None:
+            if rejection.get("status") != "rejected" or not rejection.get("audit"):
+                return False, "rejected without a persistable audit trail (status rejected)"
+            return True, "rejected deterministically, with a store-ready rejected trail"
         return True, "rejected by deterministic validation, as expected"
 
     assert analysis is not None  # outcome == "analyzed" guarantees this
@@ -199,18 +207,21 @@ def run_live(cases: list[dict[str, Any]], markdown: bool) -> int:
     for case in cases:
         started = time.monotonic()
         analysis: "agent.Analysis | None" = None
+        rejection: "dict[str, Any] | None" = None
         detail = ""
         try:
             analysis = intake.handle(case_text(case))
             outcome = "analyzed"
         except agent.ValidationError as exc:
             outcome, detail = "rejected", str(exc)
+            to_dict = getattr(exc, "to_dict", None)
+            rejection = to_dict() if callable(to_dict) else None
         except Exception as exc:  # never let one case kill the suite
             outcome, detail = "error", f"{type(exc).__name__}: {exc}"
             log.error("case %s crashed the pipeline: %s", case["id"], detail)
         elapsed = time.monotonic() - started
 
-        passed, reason = judge(case, outcome, analysis)
+        passed, reason = judge(case, outcome, analysis, rejection=rejection)
         status = status_of(passed, case.get("known_failing", False))
         rows.append({
             "case": case, "status": status, "outcome": outcome, "reason": reason,
@@ -389,6 +400,23 @@ def check(cases: list[dict[str, Any]]) -> int:
         assert got_pass is should_pass, \
             f"scorer scenario {i} ({expect} / {outcome}): got {got_pass}, want {should_pass} — {reason}"
 
+    # Rejection-trail scenarios (product pass): a rejection observed live must
+    # carry a persistable trail — ValidationError.to_dict() with status
+    # rejected and a non-empty audit. `None` = no trail info offered (judge
+    # can't demand one; keeps the scorer usable against older pipelines).
+    rejection_scenarios = [  # (rejection, should_pass)
+        ({"request_id": "req_x", "status": "rejected", "error": "text too short",
+          "audit": [{"step": "received"}, {"step": "validated"}, {"step": "rejected"}]}, True),
+        ({"request_id": "req_x", "status": "rejected", "error": "text too short",
+          "audit": []}, False),
+        (None, True),
+    ]
+    for i, (rejection, should_pass) in enumerate(rejection_scenarios):
+        got_pass, reason = judge({"expect": {"outcome": "rejected"}}, "rejected", None,
+                                 rejection=rejection)
+        assert got_pass is should_pass, \
+            f"rejection scenario {i}: got {got_pass}, want {should_pass} — {reason}"
+
     # Length-bound cases must actually sit on the right side of the validator's bounds.
     for case in cases:
         text = agent.normalize_text(case_text(case))
@@ -400,8 +428,8 @@ def check(cases: list[dict[str, Any]]) -> int:
                 f"{case['id']}: text length {len(text)} would be rejected before classification"
 
     known = [c["id"] for c in cases if c.get("known_failing")]
-    print(f"check: {len(cases)} cases schema-clean, {len(scenarios)} scorer scenarios pass, "
-          f"length bounds verified")
+    print(f"check: {len(cases)} cases schema-clean, {len(scenarios)} scorer + "
+          f"{len(rejection_scenarios)} rejection scenarios pass, length bounds verified")
     print(f"check: known_failing = {known if known else 'none'}")
     return 0
 

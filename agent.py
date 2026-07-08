@@ -98,11 +98,22 @@ class ValidationError(RuntimeError):
     Distinct from the literal `assert`s in the pipeline: ValidationError means
     bad *input* (reject the request); a failed assert means a *bug* or a
     malformed model reading crossing the code<->LLM seam.
+
+    Rejections are persistable, not vanished: `audit` carries the finished
+    trail (received -> validated[status=rejected] -> rejected) and `to_dict()`
+    returns a store-ready record with status "rejected" — the rejected-request
+    counterpart of Analysis.to_dict().
     """
 
-    def __init__(self, message: str, request_id: "str | None" = None):
+    def __init__(self, message: str, request_id: "str | None" = None,
+                 audit: "list[dict[str, Any]] | None" = None):
         super().__init__(message)
         self.request_id = request_id
+        self.audit: list[dict[str, Any]] = audit if audit is not None else []
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"request_id": self.request_id, "status": "rejected",
+                "error": str(self), "audit": self.audit}
 
 
 class ClassificationError(RuntimeError):
@@ -253,6 +264,7 @@ class Analysis:
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["request_type"] = self.request_type.value
+        data["status"] = "analyzed"  # counterpart of ValidationError's "rejected"
         return data
 
 
@@ -482,7 +494,16 @@ class IntakeAgent:
         request = ServiceRequest.new(raw_text=normalize_text(raw_text), channel=channel)
         self._record(trail, "received", request=asdict(request), raw_chars=len(raw_text))
 
-        checks = self._validate(request)
+        try:
+            checks = self._validate(request)
+        except ValidationError as exc:
+            # A rejection is persisted, not vanished: finish the trail with
+            # status rejected and hand it to the caller on the exception.
+            self._record(trail, "validated", status="rejected", problems=str(exc))
+            self._record(trail, "rejected", reason=str(exc))
+            exc.audit = trail
+            log.info("%s rejected: %s", request.request_id, exc)
+            raise
         self._record(trail, "validated", status="passed", checks=checks)
 
         area = scan_service_area_mentions(request.raw_text)
@@ -1062,7 +1083,7 @@ class ApiHandler(_JsonHandler):
         try:
             analysis = self.agent.handle(body["text"], channel=body.get("channel", "web"))
         except ValidationError as exc:
-            self._send_json(400, {"request_id": exc.request_id, "error": str(exc)})
+            self._send_json(400, exc.to_dict())  # status rejected + the finished trail
             return
         self._send_json(200, analysis.to_dict())
 
@@ -1298,6 +1319,7 @@ def selftest() -> int:
     assert classified_step["classifier"] == "llm", classified_step
     hazard_step = next(s for s in analysis.audit if s["step"] == "hazard_screen")
     assert hazard_step["triggered"] is False and hazard_step["matched_terms"] == [], hazard_step
+    assert analysis.to_dict()["status"] == "analyzed"
 
     # hazmat phrasing (the live-bug regression case): deterministic screen
     # classifies + escalates and the LLM is never consulted
@@ -1700,6 +1722,17 @@ def selftest() -> int:
             raise AssertionError(f"must reject raw={raw[:20]!r} channel={channel!r}")
         except ValidationError as exc:
             assert exc.request_id, "rejections must still carry a request_id"
+            # product pass: a rejection carries a finished, persistable trail
+            # (status rejected) instead of discarding what was recorded
+            assert exc.audit and exc.audit[0]["step"] == "received", exc.audit
+            validated_step = next(s for s in exc.audit if s["step"] == "validated")
+            assert validated_step["status"] == "rejected" and validated_step["problems"]
+            rejected_step = next(s for s in exc.audit if s["step"] == "rejected")
+            assert rejected_step["reason"] == str(exc)
+            record = exc.to_dict()
+            assert record["status"] == "rejected" and record["request_id"] == exc.request_id
+            assert record["error"] == str(exc) and record["audit"] is exc.audit
+            json.dumps(record)  # the rejected record must be store-ready too
 
     # web layer: real HTTP round-trips on ephemeral ports (no fixed-port collisions)
     ApiHandler.agent = agent_ok
@@ -1731,7 +1764,10 @@ def selftest() -> int:
             urllib.request.urlopen(bad)
             raise AssertionError("short text must return HTTP 400")
         except urllib.error.HTTPError as err:
-            assert err.code == 400 and "error" in json.loads(err.read())
+            body = json.loads(err.read())
+            assert err.code == 400 and "error" in body
+            assert body["status"] == "rejected", body
+            assert body["audit"] and body["audit"][-1]["step"] == "rejected", body
 
         with urllib.request.urlopen(f"{api}/health") as res:
             assert res.status == 200 and json.loads(res.read())["status"] == "ok"
@@ -1877,7 +1913,7 @@ def main(argv: "list[str] | None" = None) -> int:
         analysis = agent.handle(raw_text)
     except ValidationError as exc:
         log.error("request rejected: %s", exc)
-        print(json.dumps({"request_id": exc.request_id, "error": str(exc)}, indent=2))
+        print(json.dumps(exc.to_dict(), indent=2))
         return 2
 
     print(json.dumps(analysis.to_dict(), indent=2))
