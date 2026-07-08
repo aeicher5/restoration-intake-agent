@@ -540,9 +540,16 @@ def admin_list(request: Request) -> Response:
     if denied is not None:
         return denied
     records = STORE.list_newest_first()
+    wf_states = WORKFLOW.states_by_request()
+    unresolved = [s for s in wf_states.values() if s["state"] != "resolved"]
+    queue_counts = {
+        "unresolved": len(unresolved),
+        "life_safety": sum(1 for s in unresolved if s["life_safety"]),
+    }
     return templates.TemplateResponse(
         request, "admin.html",
-        {"active": "admin", "records": records, "stats": build_stats(records)},
+        {"active": "admin", "records": records, "stats": build_stats(records),
+         "wf_states": wf_states, "queue_counts": queue_counts},
     )
 
 
@@ -643,10 +650,23 @@ def admin_detail(request: Request, request_id: str) -> Response:
             "recorded": recorded,
             "safety": step_safety_flag(name, recorded),
         })
+    # The trail no longer ends where the human begins: escalation-workflow
+    # events continue it, rendered by the same generic step renderer.
+    for event in WORKFLOW.events_for(request_id):
+        name = event.get("event", "escalation_event")
+        recorded = {k: v for k, v in event.items()
+                    if k not in ("kind", "event", "request_id", "at")}
+        steps.append({
+            "name": name,
+            "at": event.get("at", ""),
+            "recorded": recorded,
+            "safety": step_safety_flag(name, recorded),
+        })
     return templates.TemplateResponse(
         request, "detail.html",
         {"active": "admin", "record": record, "request_id": request_id,
-         "steps": steps, "path": escalation_path(record)},
+         "steps": steps, "path": escalation_path(record),
+         "wf": WORKFLOW.state_of(request_id)},
     )
 
 

@@ -254,6 +254,12 @@ class EscalationWorkflow:
             return None
         return self.derive_state(record, events.get(request_id, []))
 
+    def events_for(self, request_id: str) -> "list[dict[str, Any]]":
+        """One request's escalation events in file order — the detail view
+        appends these to the pipeline's steps, same renderer."""
+        _, events = self._scan()
+        return events.get(request_id, [])
+
     def states_by_request(self) -> "dict[str, dict[str, Any]]":
         """request_id -> derived state, for every escalated request. The admin
         table paints its workflow-state chips from this in one call."""
