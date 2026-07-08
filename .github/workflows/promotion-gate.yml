@@ -74,6 +74,9 @@ jobs:
       - name: Extended evals — schema and scorer check (offline)
         run: python3 evals/run_extended.py --check
 
+      - name: Correction ingest — selftest (offline, synthetic log)
+        run: python3 evals/ingest_corrections.py --selftest
+
   live-extended-suite:
     # Runs the full extended eval suite against the real API — the actual
     # promotion evidence. Requires the ANTHROPIC_API_KEY repository secret

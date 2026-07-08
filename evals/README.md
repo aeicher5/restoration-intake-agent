@@ -67,6 +67,32 @@ phrasing live, and a **suite-wide invariant** checks every analyzed case — a f
 confidence sits below the bar its own `finalized` step recorded must have been escalated.
 Selftest (`python3 agent.py --selftest`) pins the exact shipped floors offline.
 
+## Closing the loop: corrections from resolved escalations
+
+When a human resolves an escalated request and corrects the classifier's read, that's a
+labeled example — exactly what this suite is made of. `ingest_corrections.py` harvests them:
+
+```bash
+python3 evals/ingest_corrections.py             # reads audit_log.jsonl at the repo root
+python3 evals/ingest_corrections.py --log PATH  # or any JSONL audit log
+python3 evals/ingest_corrections.py --selftest  # offline check on a synthetic log
+```
+
+It scans the log for `escalation_resolved` events (the escalation workstream owns that event
+shape, so consumption is generic — top-level records or nested audit steps, several
+correction-key spellings, nested `resolution` objects) and every resolved event carrying a
+corrected type becomes a candidate in **`evals/corrections.json`**: the corrected label, the
+original request text, provenance (who resolved it, when, what the model originally read),
+and a ready-to-edit `proposed_case` in this suite's schema.
+
+**`corrections.json` is a review queue, not a golden set.** Nothing is ever auto-merged into
+`extended_cases.json` — the script refuses to write that file by construction. A human
+reviews each candidate (corrections can be wrong too), edits the proposed case, copies it in
+by hand, and marks the candidate `merged` or `rejected`. Re-runs are idempotent and never
+overwrite a candidate a human has touched. `request_type` alone never counts as a correction
+(that's the model's original read); resolutions correcting to `unknown` are skipped by the
+same rule — a fail-safe value is not a label.
+
 ## Results — live run, 2026-07-08 (post-product-pass)
 
 Config: primary `claude-haiku-4-5`, fallback `claude-sonnet-5`, escalation `claude-opus-4-8`,
