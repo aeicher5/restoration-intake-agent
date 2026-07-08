@@ -151,6 +151,18 @@ def judge(case: dict[str, Any], outcome: str,
         if flagged is not expect["life_safety"]:
             return False, f"life_safety={flagged}, expected {expect['life_safety']}"
 
+    # Deterministic reply invariant, checked on every analyzed case: a drafted
+    # (non-fallback) reply on a life-safety analysis must open with the 911
+    # line. The pipeline enforces this in code, so a violation is a pipeline
+    # bug, not a model miss. Fallback replies are exempt — they carry the
+    # dispatcher note and the request routes to a human.
+    reply_step = next((s for s in getattr(analysis, "audit", [])
+                       if s.get("step") == "customer_reply"), None)
+    if (getattr(analysis, "life_safety", False) and reply_step is not None
+            and reply_step.get("source") == "drafted"
+            and not str(reply_step.get("reply") or "").startswith(agent.LIFE_SAFETY_REPLY_OPENER)):
+        return False, "drafted life-safety reply missing the 911 opener (pipeline invariant)"
+
     if expect.get("pass_if_escalated") and escalated:
         return True, f"routed to human (acceptable for this case); read was {got_type}"
 
@@ -239,6 +251,14 @@ def summarize(rows: list[dict[str, Any]], markdown: bool) -> int:
               f"escalated to human: {escalated}/{len(analyzed)}   "
               f"life-safety flags: {life_flags}   "
               f"escalation-model rereads: {rereads}   avg latency: {avg_secs:.1f}s")
+        reply_sources = [
+            next((s.get("source") for s in r["analysis"].audit
+                  if s.get("step") == "customer_reply"), None)
+            for r in analyzed
+        ]
+        print(f"customer replies: drafted {sum(s == 'drafted' for s in reply_sources)} / "
+              f"fallback {sum(s == 'fallback_dispatcher_note' for s in reply_sources)} / "
+              f"skipped {sum(s == 'skipped' for s in reply_sources)}")
 
     for r in by_status["FAIL"]:
         print(f"  FAIL  {r['case']['id']}: {r['reason']}")
@@ -258,8 +278,8 @@ def summarize(rows: list[dict[str, Any]], markdown: bool) -> int:
 
 def results_markdown(rows: list[dict[str, Any]]) -> str:
     lines = [
-        "| case | category | status | expected | got | conf | escalated | life | latency |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| case | category | status | expected | got | conf | escalated | life | reply | latency |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
         case, analysis = r["case"], r["analysis"]
@@ -278,8 +298,14 @@ def results_markdown(rows: list[dict[str, Any]]) -> str:
         conf = f"{analysis.confidence:.2f}" if analysis else "—"
         esc = ("yes" if analysis.escalate_to_human else "no") if analysis else "—"
         life = ("yes" if getattr(analysis, "life_safety", False) else "no") if analysis else "—"
+        reply = "—"
+        if analysis is not None:
+            source = next((s.get("source") for s in analysis.audit
+                           if s.get("step") == "customer_reply"), None)
+            reply = {"drafted": "drafted", "fallback_dispatcher_note": "fallback",
+                     "skipped": "skipped"}.get(source, "—")
         lines.append(f"| {case['id']} | {case['category']} | {r['status']} | {expected} "
-                     f"| {got} | {conf} | {esc} | {life} | {r['seconds']:.1f}s |")
+                     f"| {got} | {conf} | {esc} | {life} | {reply} | {r['seconds']:.1f}s |")
     return "\n".join(lines)
 
 
@@ -305,6 +331,29 @@ def check(cases: list[dict[str, Any]]) -> int:
     storm_escalated = synthetic(agent.RequestType.STORM_DAMAGE, 0.4, True)
     fire_life_safety = synthetic(agent.RequestType.FIRE_SMOKE_DAMAGE, 0.97, True, life_safety=True)
 
+    # Reply-gate synthetics (product pass): the scorer enforces one deterministic
+    # reply invariant on every analyzed case — a drafted (non-fallback) reply on
+    # a life-safety analysis must open with the 911 line. Fallback replies are
+    # exempt (they carry the dispatcher note and route to a human).
+    def with_reply(analysis: agent.Analysis, source: str, reply: "str | None") -> agent.Analysis:
+        analysis.customer_reply = reply
+        analysis.audit = [*analysis.audit,
+                          {"step": "customer_reply", "source": source, "reply": reply}]
+        return analysis
+
+    opener = agent.LIFE_SAFETY_REPLY_OPENER
+    fire_reply_ok = with_reply(
+        synthetic(agent.RequestType.FIRE_SMOKE_DAMAGE, 0.97, True, life_safety=True),
+        "drafted", f"{opener} A team member is reviewing your request right now.")
+    fire_reply_bad = with_reply(
+        synthetic(agent.RequestType.FIRE_SMOKE_DAMAGE, 0.97, True, life_safety=True),
+        "drafted", "Our crew is being dispatched — hang tight.")
+    fire_reply_fallback = with_reply(
+        synthetic(agent.RequestType.FIRE_SMOKE_DAMAGE, 0.97, True, life_safety=True),
+        "fallback_dispatcher_note", "dispatcher note text")
+    water_reply = with_reply(synthetic(agent.RequestType.WATER_DAMAGE, 0.9, False),
+                             "drafted", "Thank you — our team will be in touch shortly.")
+
     scenarios = [  # (expect, outcome, analysis, should_pass)
         ({"outcome": "analyzed", "types": ["water_damage"]}, "analyzed", water, True),
         ({"outcome": "analyzed", "life_safety": True}, "analyzed", fire_life_safety, True),
@@ -324,6 +373,12 @@ def check(cases: list[dict[str, Any]]) -> int:
         ({"outcome": "analyzed", "types": ["general_inquiry"], "pass_if_escalated": True},
          "analyzed", water, False),
         ({"outcome": "analyzed", "types": []}, "analyzed", water, True),
+        # 911-opener invariant on drafted life-safety replies (checked on every
+        # analyzed case; fallback and non-life-safety replies are exempt)
+        ({"outcome": "analyzed", "life_safety": True}, "analyzed", fire_reply_ok, True),
+        ({"outcome": "analyzed", "life_safety": True}, "analyzed", fire_reply_bad, False),
+        ({"outcome": "analyzed", "life_safety": True}, "analyzed", fire_reply_fallback, True),
+        ({"outcome": "analyzed", "types": ["water_damage"]}, "analyzed", water_reply, True),
         ({"outcome": "rejected"}, "rejected", None, True),
         ({"outcome": "rejected"}, "analyzed", water, False),
         ({"outcome": "analyzed", "types": ["water_damage"]}, "rejected", None, False),

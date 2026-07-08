@@ -104,7 +104,7 @@
     {
       "id": "urgency-active-fire",
       "category": "urgency",
-      "why": "Life-safety case: an in-progress fire must classify as fire_smoke_damage AND trip the deterministic life-safety screen — flag set, human escalation forced, no model call involved in that decision.",
+      "why": "Life-safety case: an in-progress fire must classify as fire_smoke_damage AND trip the deterministic life-safety screen — flag set, human escalation forced, no model call involved in that decision. Live runs also exercise the reply gate: the scorer's global invariant fails any drafted life-safety reply that does not open with the 911 line.",
       "text": "Our house is actively on fire right now, there are flames coming out of the kitchen and smoke everywhere. What do we do??",
       "expect": {
         "outcome": "analyzed",
@@ -118,7 +118,7 @@
     {
       "id": "life-safety-gas-leak-co",
       "category": "urgency",
-      "why": "Gas + carbon monoxide phrasing: the taxonomy has no gas category, so the type read is unconstrained — what matters is the deterministic life-safety flag and forced human escalation.",
+      "why": "Gas + carbon monoxide phrasing: the taxonomy has no gas category, so the type read is unconstrained — what matters is the deterministic life-safety flag and forced human escalation. Live runs also exercise the reply gate's 911-opener invariant.",
       "text": "We can smell gas in the kitchen and the carbon monoxide alarm just went off — the whole family is feeling dizzy. Can you send someone?",
       "expect": {
         "outcome": "analyzed",
