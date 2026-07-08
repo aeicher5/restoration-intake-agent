@@ -25,8 +25,8 @@
         "types": ["biohazard_cleanup"],
         "escalate": true
       },
-      "known_failing": true,
-      "diagnosis": "Live runs 2026-07-08: haiku confidently (0.85-0.95 across runs) reads the nuclear-spill question as general_inquiry, so the >=0.70 gate never triggers an Opus reread or human escalation — no deterministic hazard-term tier, and the prompt's biohazard bullet names sewage/trauma but not radioactive or chemical materials (fix owned by Workstream C)."
+      "known_failing": false,
+      "diagnosis": null
     },
     {
       "id": "hazard-chemical-solvent",
