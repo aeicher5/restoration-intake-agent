@@ -38,6 +38,35 @@ important labeling choices:
   as `XFAIL` and keeps the suite green; once fixed it reports `XPASS` with a loud reminder to flip
   the flag. The suite only goes red (`exit 1`) on *unexpected* failures.
 
+## The promotion surface: versioned prompts and per-class thresholds
+
+Everything the pipeline's judgment depends on — the three system prompts and the confidence
+thresholds — lives in `agent.PROMPT_CONFIG`, a frozen structure with an explicit `version`
+string and a content `fingerprint()`. Every audit trail's `classified` step records both, so
+any request can be traced to the exact artifact that read it. **Changing any of it means
+bumping the version, and the CI promotion gate re-runs this suite before the change lands**
+(see `.github/workflows/`).
+
+Confidence thresholds are per-class-aware (config `1.2.0`):
+
+| class | bar | why |
+|---|---|---|
+| `biohazard_cleanup` | **0.85** | a wrong read near hazmat sends a crew in with the wrong protective posture; the deterministic hazard screen catches *obvious* phrasing at confidence 1.0, this floor guards the subtler model-read calls |
+| `fire_smoke_damage` | **0.85** | fire routing sits next to the life-safety tier; a shaky fire read gets a second opinion before passing as routine intake |
+| everything else | 0.70 (global) | cheap to misroute — a water/mold/storm mix-up costs a phone call |
+
+Per-class values are *floors*: the effective bar is `max(global, class floor)`, so raising the
+global via `INTAKE_CONFIDENCE_THRESHOLD` tightens everything and a class entry can never
+silently loosen below it. The bar is judged against the class each read actually reports (an
+Opus reread that lands on a different class is judged against *that* class's bar), and the
+`finalized` audit step records the effective threshold and its source
+(`class:fire_smoke_damage` vs `global`) for every request.
+
+The suite pins this two ways: the `threshold` category cases probe borderline safety-class
+phrasing live, and a **suite-wide invariant** checks every analyzed case — a final read whose
+confidence sits below the bar its own `finalized` step recorded must have been escalated.
+Selftest (`python3 agent.py --selftest`) pins the exact shipped floors offline.
+
 ## Results — live run, 2026-07-08 (post-product-pass)
 
 Config: primary `claude-haiku-4-5`, fallback `claude-sonnet-5`, escalation `claude-opus-4-8`,
