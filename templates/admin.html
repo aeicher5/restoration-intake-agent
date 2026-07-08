@@ -69,7 +69,9 @@
       <td><span class="chip">{{ r.request_type.replace('_', ' ') }}</span></td>
       <td>{{ "%.2f"|format(r.confidence) }}</td>
       <td>
-        {% if r.escalate_to_human %}
+        {% if r.get('extras', {}).get('status') == 'rejected' %}
+        <span class="badge rejected">rejected</span>
+        {% elif r.escalate_to_human %}
         <span class="badge human">human review</span>
         {% else %}
         <span class="badge auto">auto</span>
