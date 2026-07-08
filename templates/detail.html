@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Restoration Intake — {{ request_id }}{% endblock %}
+{% block width %}960px{% endblock %}
+{% block content %}
+{% if record is none %}
+<h1>Not found</h1>
+<p class="sub">No request <code>{{ request_id }}</code> in the audit store.</p>
+<p><a href="/admin">← Back to all requests</a></p>
+{% else %}
+<h1><code>{{ record.request_id }}</code></h1>
+<p class="sub">Received {{ record.received_at | ts }} via {{ record.channel or "?" }} ·
+<a href="/admin">← all requests</a></p>
+
+<div class="card" style="margin-top:0">
+  <dl>
+    <dt>type</dt><dd><span class="chip">{{ record.request_type.replace('_', ' ') }}</span></dd>
+    <dt>confidence</dt><dd>{{ "%.2f"|format(record.confidence) }}</dd>
+    <dt>routing</dt>
+    <dd>
+      {% if record.escalate_to_human %}
+      <span class="badge human">human review</span>
+      {% else %}
+      <span class="badge auto">auto</span>
+      {% endif %}
+    </dd>
+    {% if path %}<dt>model path</dt><dd>{{ path }}</dd>{% endif %}
+    <dt>dispatcher note</dt><dd>{{ record.notes }}</dd>
+    <dt>customer text</dt><dd>{{ record.raw_text }}</dd>
+  </dl>
+</div>
+
+<h2>Audit trail</h2>
+<p class="sub">Every pipeline step in order, with the exact values recorded at that step —
+including model attempts, token usage, errors, and the escalation decision.</p>
+{% for step in steps %}
+<div class="step">
+  <div class="step-head">
+    <h3>{{ loop.index }}. {{ step.name }}</h3>
+    <span class="at">{{ step.at | ts }}</span>
+  </div>
+  <pre>{{ step.recorded | pretty }}</pre>
+</div>
+{% endfor %}
+{% endif %}
+{% endblock %}

@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Restoration Intake — Admin{% endblock %}
+{% block width %}960px{% endblock %}
+{% block content %}
+<h1>Processed requests</h1>
+<p class="sub">Read from the audit store, newest first.
+{% if stats.total %}{{ stats.total }} total · {{ stats.escalated }} flagged for human review.{% endif %}
+Click a row for the full audit trail.</p>
+
+<div class="table-wrap">
+{% if records %}
+<table>
+  <thead>
+    <tr>
+      <th>Received</th>
+      <th>Request</th>
+      <th>Type</th>
+      <th>Conf.</th>
+      <th>Routing</th>
+      <th>Customer text</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in records %}
+    <tr data-href="/admin/{{ r.request_id }}" {% if r.escalate_to_human %}class="escalated"{% endif %}>
+      <td class="muted" style="white-space:nowrap">{{ r.received_at | ts }}</td>
+      <td><a href="/admin/{{ r.request_id }}"><code>{{ r.request_id }}</code></a></td>
+      <td><span class="chip">{{ r.request_type.replace('_', ' ') }}</span></td>
+      <td>{{ "%.2f"|format(r.confidence) }}</td>
+      <td>
+        {% if r.escalate_to_human %}
+        <span class="badge human">human review</span>
+        {% else %}
+        <span class="badge auto">auto</span>
+        {% endif %}
+      </td>
+      <td>{{ r.raw_text[:90] }}{% if r.raw_text|length > 90 %}…{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No requests yet — submit one from the <a href="/">intake page</a>.</div>
+{% endif %}
+</div>
+
+<script>
+  // Whole-row click-through; the request-id link inside stays a real link.
+  document.querySelectorAll("tr[data-href]").forEach((row) => {
+    row.addEventListener("click", (event) => {
+      if (event.target.closest("a")) return;
+      window.location = row.dataset.href;
+    });
+  });
+</script>
+{% endblock %}

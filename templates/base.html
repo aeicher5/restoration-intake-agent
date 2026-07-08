@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Restoration Intake{% endblock %}</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         margin: 0; background: #f4f4f2; color: #1e2226; }
+  header { background: #fff; border-bottom: 1px solid #dde1e5; }
+  nav { max-width: 960px; margin: 0 auto; padding: .65rem 1rem;
+        display: flex; gap: 1.1rem; align-items: baseline; }
+  .brand { font-weight: 700; margin-right: auto; }
+  nav a { color: #5b6570; text-decoration: none; font-size: .9rem; padding-bottom: .15rem; }
+  nav a.on { color: #1c6e45; font-weight: 600; border-bottom: 2px solid #1c6e45; }
+  main { max-width: {% block width %}720px{% endblock %}; margin: 2.5rem auto 0; padding: 0 1rem; }
+  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.05rem; margin: 1.75rem 0 .6rem; }
+  p.sub { margin: 0 0 1.5rem; color: #5b6570; font-size: .9rem; }
+  textarea { width: 100%; min-height: 8rem; padding: .75rem; font: inherit;
+             border: 1px solid #c6ccd2; border-radius: 8px; resize: vertical; background: #fff; }
+  button { margin-top: .75rem; padding: .6rem 1.4rem; font: inherit; font-weight: 600;
+           color: #fff; background: #1c6e45; border: 0; border-radius: 8px; cursor: pointer; }
+  .card { background: #fff; border: 1px solid #dde1e5; border-radius: 10px;
+          padding: 1rem 1.25rem; margin-top: 1.25rem; }
+  .card.error { border-color: #cf3f3f; background: #fdf3f3; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: .4rem 1.25rem; margin: 0; }
+  dt { color: #5b6570; }
+  dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .badge { display: inline-block; padding: .1rem .55rem; border-radius: 999px;
+           font-size: .8rem; white-space: nowrap; }
+  .badge.human { background: #fde8cd; color: #8a4b00; }
+  .badge.auto { background: #d9f2e4; color: #14532d; }
+  .chip { display: inline-block; padding: .1rem .55rem; border-radius: 999px; font-size: .8rem;
+          background: #eef1f4; color: #3b4650; white-space: nowrap; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85em;
+         background: #f6f8fa; padding: .1rem .3rem; border-radius: 4px; }
+  pre { overflow-x: auto; background: #f6f8fa; padding: .75rem; border-radius: 8px;
+        font-size: .8rem; margin: .4rem 0 0; }
+  .muted { color: #8a939c; }
+  .table-wrap { background: #fff; border: 1px solid #dde1e5; border-radius: 10px;
+                margin-top: 1.25rem; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  th, td { text-align: left; padding: .55rem .8rem; border-bottom: 1px solid #eef0f2;
+           vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  th { color: #5b6570; font-weight: 600; font-size: .75rem; text-transform: uppercase;
+       letter-spacing: .04em; background: #fafbfb; }
+  tbody tr[data-href] { cursor: pointer; }
+  tbody tr[data-href]:hover { background: #f6f8f7; }
+  tbody tr.escalated { background: #fffaf3; }
+  tbody tr.escalated:hover { background: #fdf3e3; }
+  td a { color: #1c6e45; text-decoration: none; }
+  .empty { text-align: center; padding: 2.5rem 1rem; color: #8a939c; }
+  .step { background: #fff; border: 1px solid #dde1e5; border-radius: 10px;
+          padding: .9rem 1.1rem; margin-bottom: .75rem; }
+  .step-head { display: flex; align-items: baseline; gap: 1rem; }
+  .step-head h3 { margin: 0; font-size: .95rem; }
+  .step-head .at { margin-left: auto; color: #8a939c; font-size: .8rem;
+                   font-variant-numeric: tabular-nums; }
+  footer { max-width: 960px; margin: 2rem auto 2.5rem; padding: 0 1rem;
+           color: #8a939c; font-size: .8rem; }
+</style>
+</head>
+<body>
+<header>
+  <nav>
+    <span class="brand">Restoration Intake</span>
+    <a href="/" {% if active == 'intake' %}class="on"{% endif %}>Customer intake</a>
+    <a href="/admin" {% if active == 'admin' %}class="on"{% endif %}>Admin</a>
+  </nav>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+<footer>{% block footer %}Every request is processed by the intake pipeline and recorded
+step by step in the audit trail — the admin view reads straight from it.{% endblock %}</footer>
+</body>
+</html>

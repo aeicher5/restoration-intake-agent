@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Restoration Intake — Request help{% endblock %}
+{% block content %}
+<h1>Tell us what happened</h1>
+<p class="sub">Describe the problem in your own words — water, fire, smoke, mold, storm
+damage, anything. Our intake system reads it immediately and routes it to the right team.</p>
+
+<form method="post" action="/">
+  <textarea name="text" placeholder="e.g. Our basement flooded overnight after the storm — standing water everywhere, and I'm worried about mold. We're in Cedar Park."
+    >{{ text }}</textarea>
+  <button type="submit">Submit request</button>
+</form>
+
+{% if error %}
+<div class="card error">
+  <strong>We couldn't process that.</strong> {{ error }}
+  {% if error_request_id %}<br><small class="muted">reference: {{ error_request_id }}</small>{% endif %}
+</div>
+{% endif %}
+
+{% if result %}
+{% set type_label = 'pending review' if result.request_type == 'unknown'
+                    else result.request_type.replace('_', ' ') %}
+<div class="card">
+  <h2 style="margin-top:0">Request received ✓</h2>
+  <dl>
+    <dt>reference</dt><dd><code>{{ result.request_id }}</code></dd>
+    <dt>assessed as</dt><dd><span class="chip">{{ type_label }}</span></dd>
+    <dt>confidence</dt><dd>{{ "%.2f"|format(result.confidence) }}</dd>
+    <dt>status</dt>
+    <dd>
+      {% if result.escalate_to_human %}
+      <span class="badge human">specialist review</span>
+      A coordinator will review this personally and follow up with you directly.
+      {% else %}
+      <span class="badge auto">queued for dispatch</span>
+      Routed to our {{ type_label }} team.
+      {% endif %}
+    </dd>
+    <dt>assessment</dt><dd>{{ result.notes }}</dd>
+  </dl>
+  <p class="muted" style="margin-bottom:0"><small>Keep your reference number handy —
+  it identifies this request from here on.</small></p>
+</div>
+{% endif %}
+{% endblock %}
