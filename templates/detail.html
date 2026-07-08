@@ -23,7 +23,17 @@
       <span class="badge auto">auto</span>
       {% endif %}
     </dd>
-    {% if path %}<dt>model path</dt><dd>{{ path }}</dd>{% endif %}
+    {% if path %}
+    <dt>model path</dt>
+    <dd>
+      <span class="path-chain">
+        {%- for hop in path -%}
+        <span class="chip{% if 'failed' in hop or 'human review' in hop or 'still low' in hop %} warn{% elif 'auto-accepted' in hop %} good{% endif %}">{{ hop }}</span>
+        {%- if not loop.last %}<span class="path-arrow">→</span>{% endif -%}
+        {%- endfor -%}
+      </span>
+    </dd>
+    {% endif %}
     <dt>dispatcher note</dt><dd>{{ record.notes }}</dd>
     <dt>customer text</dt><dd>{{ record.raw_text }}</dd>
     {% if record.extras and record.extras.customer_reply %}

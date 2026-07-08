@@ -82,7 +82,13 @@
   </tbody>
 </table>
 {% else %}
-<div class="empty">No requests yet — submit one from the <a href="/">intake page</a>.</div>
+<div class="empty">
+  <p style="margin:0 0 .4rem"><strong>No requests yet.</strong></p>
+  <p style="margin:0">Submit one from the <a href="/">intake page</a>, or seed five
+  archetypal runs with <code>python3 demo.py</code> — it exercises every pipeline
+  path (clean read, hazard screen, Opus reread, rejection, high-confidence fire)
+  and fills this view.</p>
+</div>
 {% endif %}
 </div>
 

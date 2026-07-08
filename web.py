@@ -260,10 +260,11 @@ def request_cost(record: Mapping[str, Any]) -> dict[str, Any]:
             "unpriced": unpriced}
 
 
-def escalation_path(record: Mapping[str, Any]) -> str:
-    """One-line, human-readable routing path reconstructed from the audit trail:
-    which models were attempted, whether each succeeded, and where the request
-    ended up (auto-accepted, resolved on reread, or human review)."""
+def escalation_path(record: Mapping[str, Any]) -> "list[str]":
+    """Human-readable routing hops reconstructed from the audit trail: which
+    models were attempted, whether each succeeded, and where the request ended
+    up (auto-accepted, resolved on reread, or human review). The detail view
+    renders the hops as a chip chain."""
     audit = record.get("audit", [])
     classified = next((s for s in audit if s.get("step") == "classified"), {})
     finalized = next((s for s in audit if s.get("step") == "finalized"), {})
@@ -285,7 +286,7 @@ def escalation_path(record: Mapping[str, Any]) -> str:
         hops.extend([f"low confidence, reread on {reread_model} failed", "human review"])
     elif record.get("escalate_to_human"):
         hops.append("human review")
-    return "  →  ".join(hops)
+    return hops
 
 
 # ------------------------------------------------------------------ app wiring
