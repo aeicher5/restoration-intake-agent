@@ -1,0 +1,13 @@
+# Secrets never enter the image — pass ANTHROPIC_API_KEY at run time
+# (docker run --env-file .env ...). This line is load-bearing.
+.env
+
+.git
+.gitignore
+__pycache__/
+*.pyc
+.DS_Store
+HANDOFF-*.md
+SPRINT.md
+Dockerfile
+.dockerignore
