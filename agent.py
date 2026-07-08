@@ -179,9 +179,10 @@ class Settings:
         )
 
     def summary(self) -> dict[str, Any]:
-        """Loggable view of the config — never exposes the API key."""
+        """Loggable view of the config — reports key presence only, never any
+        part of the secret, even masked (this reaches /health endpoints)."""
         return {
-            "anthropic_api_key": f"…{self.anthropic_api_key[-4:]}",
+            "anthropic_api_key": "set" if self.anthropic_api_key else "missing",
             "primary_model": self.primary_model,
             "fallback_model": self.fallback_model,
             "escalation_model": self.escalation_model,
@@ -904,6 +905,9 @@ def selftest() -> int:
     assert settings.escalation_model == DEFAULT_ESCALATION_MODEL
     assert settings.confidence_threshold == DEFAULT_CONFIDENCE_THRESHOLD
     assert settings.max_retries == DEFAULT_MAX_RETRIES
+    summary = settings.summary()
+    assert summary["anthropic_api_key"] == "set", "summary must report key presence only"
+    assert "test-key" not in json.dumps(summary), "summary must never contain the key"
     for bad_threshold in ("nope", "1.5", "-0.1"):
         try:
             Settings.from_env({"ANTHROPIC_API_KEY": "k", "INTAKE_CONFIDENCE_THRESHOLD": bad_threshold})
