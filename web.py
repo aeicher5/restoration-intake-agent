@@ -4,11 +4,16 @@ Two server-rendered surfaces on one FastAPI app (templates/ holds the HTML):
 
     GET  /                customer-facing free-text intake form
     POST /                runs the pipeline, renders the analysis result
+                          (per-IP token-bucket rate limit; 429 + Retry-After)
     GET  /admin           company-facing: all processed requests, newest first,
                           escalated rows flagged
     GET  /admin/{id}      full audit detail for one request: every step, values,
                           model attempts, confidence, escalation path
     GET  /health          JSON liveness + masked config summary
+
+Both /admin views are open on localhost by default; set ADMIN_TOKEN to require
+a token (?token=... once, then a cookie). The token value is never logged —
+uvicorn's access line is redacted before it is emitted.
 
 agent.py is imported, never modified. It returns each request's audit trail on
 the Analysis object but persists nothing, so this module adds the missing
@@ -20,21 +25,27 @@ arrives.
 Usage:
     pip install -r requirements.txt
     python3 web.py                          # http://localhost:8080
-    INTAKE_WEB_PORT=9000 python3 web.py     # pick another port
+    PORT=9000 python3 web.py                # pick another port (INTAKE_WEB_PORT
+                                            # also honored; PORT wins)
+    ADMIN_TOKEN=... python3 web.py          # gate /admin views behind the token
     uvicorn web:app --reload --port 8080    # dev auto-reload
 """
 
+import hmac
 import json
 import logging
+import math
 import os
+import re
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from agent import (
@@ -49,7 +60,23 @@ log = logging.getLogger("intake.web")
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_AUDIT_LOG = BASE_DIR / "audit_log.jsonl"
-WEB_PORT = int(os.environ.get("INTAKE_WEB_PORT", "8080"))
+# PORT is the deploy-platform convention and wins; INTAKE_WEB_PORT remains as
+# the documented local override from earlier revisions.
+WEB_PORT = int(os.environ.get("PORT", os.environ.get("INTAKE_WEB_PORT", "8080")))
+
+# Unset (the default) leaves /admin open — the original localhost posture.
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+ADMIN_TOKEN_COOKIE = "intake_admin_token"
+
+# USD per 1M tokens (input, output) — platform.claude.com/docs/en/pricing,
+# checked 2026-07-08. claude-sonnet-5 has introductory pricing ($2/$10) through
+# 2026-08-31; the standard rate is hardcoded so estimates stay valid after it
+# lapses. Models missing from this table are counted but reported as unpriced.
+MODEL_PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
+    "claude-haiku-4-5": (1.00, 5.00),
+    "claude-sonnet-5": (3.00, 15.00),
+    "claude-opus-4-8": (5.00, 25.00),
+}
 
 
 # ------------------------------------------------------------------ audit store
@@ -97,17 +124,68 @@ class AuditStore:
         return len(self._read_all())
 
 
+# ----------------------------------------------------------------- rate limit
+
+class RateLimiter:
+    """Per-key token bucket: `burst` requests immediately, refilled at
+    `per_minute`/60 tokens a second. In-memory and per-process — resets on
+    restart, not shared across replicas; swap for a shared store alongside
+    the audit store when the deployment grows past one process.
+    """
+
+    MAX_KEYS = 4096  # prune idle buckets past this; bounds memory under churn
+
+    def __init__(self, burst: int, per_minute: float):
+        self.burst = float(burst)
+        self.refill_per_sec = per_minute / 60.0
+        self._buckets: "dict[str, tuple[float, float]]" = {}  # key -> (tokens, stamp)
+        self._lock = threading.Lock()
+
+    def try_acquire(self, key: str) -> float:
+        """0.0 when a token was taken; otherwise seconds until one refills."""
+        now = time.monotonic()
+        with self._lock:
+            tokens, stamp = self._buckets.get(key, (self.burst, now))
+            tokens = min(self.burst, tokens + (now - stamp) * self.refill_per_sec)
+            if tokens >= 1.0:
+                self._buckets[key] = (tokens - 1.0, now)
+                if len(self._buckets) > self.MAX_KEYS:
+                    self._prune(now)
+                return 0.0
+            self._buckets[key] = (tokens, now)
+            return (1.0 - tokens) / self.refill_per_sec
+
+    def _prune(self, now: float) -> None:
+        """Drop buckets that have refilled to full — indistinguishable from
+        never having been seen. Called with the lock held."""
+        full = [
+            key for key, (tokens, stamp) in self._buckets.items()
+            if tokens + (now - stamp) * self.refill_per_sec >= self.burst
+        ]
+        for key in full:
+            del self._buckets[key]
+
+
+# Result fields the web layer knows by name. Anything else the pipeline adds
+# to Analysis.to_dict() (customer_reply, critic verdicts, ...) rides along in
+# record["extras"] and renders generically — new fields need no changes here.
+KNOWN_RESULT_FIELDS = frozenset({
+    "request_id", "request_type", "confidence", "escalate_to_human", "notes", "audit",
+})
+
+
 def make_record(analysis_dict: Mapping[str, Any]) -> dict[str, Any]:
     """Flatten an Analysis.to_dict() into the stored record shape.
 
     Summary fields the admin table needs live at the top level; the full audit
-    trail rides along for the detail view. Metadata comes from the trail's
-    'received' step defensively — if the pipeline's steps evolve, the record
-    degrades to blanks instead of crashing the web layer.
+    trail rides along for the detail view; unknown result fields are preserved
+    under 'extras'. Metadata comes from the trail's 'received' step
+    defensively — if the pipeline's steps evolve, the record degrades to
+    blanks instead of crashing the web layer.
     """
     received = next((s for s in analysis_dict.get("audit", []) if s.get("step") == "received"), {})
     request_meta = received.get("request", {})
-    return {
+    record = {
         "request_id": analysis_dict.get("request_id", ""),
         "received_at": request_meta.get("received_at", ""),
         "channel": request_meta.get("channel", ""),
@@ -116,14 +194,77 @@ def make_record(analysis_dict: Mapping[str, Any]) -> dict[str, Any]:
         "confidence": analysis_dict.get("confidence", 0.0),
         "escalate_to_human": analysis_dict.get("escalate_to_human", False),
         "notes": analysis_dict.get("notes", ""),
-        "audit": analysis_dict.get("audit", []),
     }
+    extras = {k: v for k, v in analysis_dict.items() if k not in KNOWN_RESULT_FIELDS}
+    if extras:
+        record["extras"] = extras
+    record["audit"] = analysis_dict.get("audit", [])
+    return record
 
 
-def escalation_path(record: Mapping[str, Any]) -> str:
-    """One-line, human-readable routing path reconstructed from the audit trail:
-    which models were attempted, whether each succeeded, and where the request
-    ended up (auto-accepted, resolved on reread, or human review)."""
+# Steps whose names look safety-related get a visual flag in the detail view:
+# a neutral marker when the screen ran clean, a loud one when it tripped
+# (any truthy trigger-ish value among the step's recorded fields).
+SAFETY_STEP_RE = re.compile(r"hazard|life[_-]?safety|urgen(t|cy)|emergency|911", re.IGNORECASE)
+SAFETY_TRIGGER_KEYS = ("triggered", "matched_terms", "matched", "flagged", "detected", "indicators")
+
+
+def step_safety_flag(name: str, recorded: Mapping[str, Any]) -> "str | None":
+    """None for ordinary steps; 'clear' / 'tripped' for safety-screen steps."""
+    if not SAFETY_STEP_RE.search(name):
+        return None
+    tripped = any(recorded.get(key) for key in SAFETY_TRIGGER_KEYS)
+    return "tripped" if tripped else "clear"
+
+
+def iter_usage(node: Any) -> "list[tuple[str | None, int, int]]":
+    """Collect (model, input_tokens, output_tokens) for every usage blob
+    anywhere in a record's audit trail.
+
+    Walks the structure generically rather than naming steps, so token usage
+    recorded by future pipeline stages (reply drafts, critic reviews, ...)
+    is priced with no changes here. The model is whatever model-ish key sits
+    beside the usage blob.
+    """
+    found: list[tuple[str | None, int, int]] = []
+    if isinstance(node, dict):
+        usage = node.get("usage")
+        if isinstance(usage, dict) and ("input_tokens" in usage or "output_tokens" in usage):
+            model = node.get("model") or node.get("escalation_model") or node.get("model_used")
+            found.append((model,
+                          int(usage.get("input_tokens") or 0),
+                          int(usage.get("output_tokens") or 0)))
+        for value in node.values():
+            found.extend(iter_usage(value))
+    elif isinstance(node, list):
+        for item in node:
+            found.extend(iter_usage(item))
+    return found
+
+
+def request_cost(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Price one request's model calls against MODEL_PRICES_PER_MTOK."""
+    usd = 0.0
+    tokens_in = tokens_out = 0
+    unpriced: set[str] = set()
+    for model, tin, tout in iter_usage(record.get("audit", [])):
+        tokens_in += tin
+        tokens_out += tout
+        prices = MODEL_PRICES_PER_MTOK.get(model or "")
+        if prices is None:
+            if model:
+                unpriced.add(model)
+            continue
+        usd += tin * prices[0] / 1e6 + tout * prices[1] / 1e6
+    return {"usd": usd, "tokens_in": tokens_in, "tokens_out": tokens_out,
+            "unpriced": unpriced}
+
+
+def escalation_path(record: Mapping[str, Any]) -> "list[str]":
+    """Human-readable routing hops reconstructed from the audit trail: which
+    models were attempted, whether each succeeded, and where the request ended
+    up (auto-accepted, resolved on reread, or human review). The detail view
+    renders the hops as a chip chain."""
     audit = record.get("audit", [])
     classified = next((s for s in audit if s.get("step") == "classified"), {})
     finalized = next((s for s in audit if s.get("step") == "finalized"), {})
@@ -145,7 +286,7 @@ def escalation_path(record: Mapping[str, Any]) -> str:
         hops.extend([f"low confidence, reread on {reread_model} failed", "human review"])
     elif record.get("escalate_to_human"):
         hops.append("human review")
-    return "  →  ".join(hops)
+    return hops
 
 
 # ------------------------------------------------------------------ app wiring
@@ -158,6 +299,30 @@ logging.basicConfig(
     stream=sys.stderr,
     format="%(levelname)s %(name)s: %(message)s",
 )
+
+
+class _TokenRedactingFilter(logging.Filter):
+    """uvicorn's access line includes the query string, which would leak
+    ?token= values into logs. Redact them before the record is emitted.
+    Attached at logger level so it survives uvicorn's dictConfig (which
+    replaces handlers but leaves logger filters alone)."""
+
+    _TOKEN_RE = re.compile(r"(token=)[^&\s\"']*")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                self._TOKEN_RE.sub(r"\1[redacted]", arg) if isinstance(arg, str) else arg
+                for arg in record.args
+            )
+        if isinstance(record.msg, str):
+            record.msg = self._TOKEN_RE.sub(r"\1[redacted]", record.msg)
+        return True
+
+
+for _logger_name in ("uvicorn.access", "uvicorn.error", "intake.web"):
+    logging.getLogger(_logger_name).addFilter(_TokenRedactingFilter())
+
 load_env()
 try:
     SETTINGS = Settings.from_env()
@@ -165,6 +330,13 @@ except ConfigError as exc:
     raise SystemExit(f"web.py startup failed: {exc}") from exc
 AGENT = IntakeAgent(SETTINGS)  # constructs the SDK client; no network call yet
 STORE = AuditStore(Path(os.environ.get("INTAKE_AUDIT_LOG", DEFAULT_AUDIT_LOG)))
+
+# POST / triggers a model pipeline run, so it is the endpoint worth guarding.
+# Defaults are generous for a human, tight for a script; env-tunable for ops.
+RATE_LIMITER = RateLimiter(
+    burst=int(os.environ.get("INTAKE_RATE_BURST", "5")),
+    per_minute=float(os.environ.get("INTAKE_RATE_PER_MINUTE", "6")),
+)
 
 app = FastAPI(title="Restoration Intake — Web", docs_url=None, redoc_url=None)
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -182,8 +354,59 @@ def _pretty_json(value: Any) -> str:
     return json.dumps(value, indent=2, ensure_ascii=False)
 
 
+def _format_usd(value: Any) -> str:
+    """Auto-compact dollars: $0 / $0.0142 (four decimals under $1) / $1.27."""
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if amount == 0:
+        return "$0"
+    if amount < 1:
+        return f"${amount:.4f}"
+    return f"${amount:.2f}"
+
+
 templates.env.filters["ts"] = _format_timestamp
 templates.env.filters["pretty"] = _pretty_json
+templates.env.filters["usd"] = _format_usd
+
+
+# ------------------------------------------------------------------ admin auth
+
+_ADMIN_DENIED_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Admin — token required</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+background:#f4f4f2;color:#1e2226;display:grid;place-items:center;min-height:100vh;margin:0}
+.card{background:#fff;border:1px solid #dde1e5;border-radius:10px;padding:1.5rem 2rem;
+max-width:26rem}h1{font-size:1.05rem;margin:0 0 .4rem}p{margin:.3rem 0;color:#5b6570;
+font-size:.9rem}code{font-family:ui-monospace,Menlo,monospace;background:#f6f8fa;
+padding:.1rem .3rem;border-radius:4px}</style></head>
+<body><div class="card"><h1>Admin access requires a token</h1>
+<p>This deployment gates the admin views. Open
+<code>/admin?token=&lt;ADMIN_TOKEN&gt;</code> once — a cookie keeps you signed
+in after that.</p></div></body></html>"""
+
+
+def _admin_guard(request: Request) -> "Response | None":
+    """None = allowed. With ADMIN_TOKEN set, a correct ?token= sets the auth
+    cookie and 303-redirects to the same path so the token drops out of the
+    URL (and browser history); after that the cookie alone authorizes. A
+    wrong or missing credential gets the 403 page. Unset ADMIN_TOKEN keeps
+    the open-localhost default. Comparisons are constant-time; the token
+    value itself is never logged (see _TokenRedactingFilter)."""
+    if not ADMIN_TOKEN:
+        return None
+    supplied = request.query_params.get("token")
+    if supplied is not None:
+        if hmac.compare_digest(supplied, ADMIN_TOKEN):
+            response = RedirectResponse(request.url.path, status_code=303)
+            response.set_cookie(ADMIN_TOKEN_COOKIE, ADMIN_TOKEN, httponly=True,
+                                samesite="lax", path="/admin")
+            return response
+    elif hmac.compare_digest(request.cookies.get(ADMIN_TOKEN_COOKIE, ""), ADMIN_TOKEN):
+        return None
+    return HTMLResponse(_ADMIN_DENIED_HTML, status_code=403)
 
 
 # ---------------------------------------------------------------------- routes
@@ -198,6 +421,19 @@ def intake_form(request: Request) -> HTMLResponse:
 
 @app.post("/", response_class=HTMLResponse)
 def intake_submit(request: Request, text: str = Form("")) -> HTMLResponse:
+    client_ip = request.client.host if request.client else "unknown"
+    wait = RATE_LIMITER.try_acquire(client_ip)
+    if wait > 0:
+        retry_after = max(1, math.ceil(wait))
+        return templates.TemplateResponse(
+            request, "index.html",
+            {"active": "intake", "result": None,
+             "error": "You're submitting faster than we can take requests in. "
+                      f"Please wait about {retry_after} seconds and try again.",
+             "text": text},
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+        )
     try:
         analysis = AGENT.handle(text, channel="web")
     except ValidationError as exc:
@@ -232,21 +468,64 @@ def intake_submit(request: Request, text: str = Form("")) -> HTMLResponse:
     )
 
 
-@app.get("/admin", response_class=HTMLResponse)
-def admin_list(request: Request) -> HTMLResponse:
-    records = STORE.list_newest_first()
-    stats = {
-        "total": len(records),
-        "escalated": sum(1 for r in records if r.get("escalate_to_human")),
+def build_stats(records: "list[dict[str, Any]]") -> dict[str, Any]:
+    """Aggregate the stats strip from the audit store, attaching each record's
+    cost as record['cost_usd'] for the per-row column on the way through."""
+    total = len(records)
+    escalated = sum(1 for r in records if r.get("escalate_to_human"))
+    # A reread happened iff the finalized step carries token usage — the only
+    # call whose usage is recorded there is the escalation-model reread.
+    rereads = sum(
+        1 for r in records
+        if any(s.get("step") == "finalized" and "usage" in s for s in r.get("audit", []))
+    )
+
+    cost_total = 0.0
+    tokens_in = tokens_out = 0
+    unpriced: set[str] = set()
+    type_counts: dict[str, int] = {}
+    for record in records:
+        cost = request_cost(record)
+        record["cost_usd"] = cost["usd"]
+        cost_total += cost["usd"]
+        tokens_in += cost["tokens_in"]
+        tokens_out += cost["tokens_out"]
+        unpriced |= cost["unpriced"]
+        label = str(record.get("request_type", "unknown")).replace("_", " ")
+        type_counts[label] = type_counts.get(label, 0) + 1
+
+    return {
+        "total": total,
+        "escalated": escalated,
+        "escalation_rate": (escalated / total) if total else 0.0,
+        "rereads": rereads,
+        "avg_confidence": (sum(r.get("confidence", 0.0) for r in records) / total) if total else 0.0,
+        "cost_total": cost_total,
+        "cost_avg": (cost_total / total) if total else 0.0,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "unpriced": sorted(unpriced),
+        "type_mix": sorted(type_counts.items(), key=lambda kv: (-kv[1], kv[0])),
     }
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_list(request: Request) -> Response:
+    denied = _admin_guard(request)
+    if denied is not None:
+        return denied
+    records = STORE.list_newest_first()
     return templates.TemplateResponse(
         request, "admin.html",
-        {"active": "admin", "records": records, "stats": stats},
+        {"active": "admin", "records": records, "stats": build_stats(records)},
     )
 
 
 @app.get("/admin/{request_id}", response_class=HTMLResponse)
-def admin_detail(request: Request, request_id: str) -> HTMLResponse:
+def admin_detail(request: Request, request_id: str) -> Response:
+    denied = _admin_guard(request)
+    if denied is not None:
+        return denied
     record = STORE.get(request_id)
     if record is None:
         return templates.TemplateResponse(
@@ -256,14 +535,16 @@ def admin_detail(request: Request, request_id: str) -> HTMLResponse:
         )
     # Key must not collide with a dict method name (e.g. "values"): Jinja's
     # attribute lookup finds the method before the item and rendering breaks.
-    steps = [
-        {
-            "name": step.get("step", "?"),
+    steps = []
+    for step in record.get("audit", []):
+        name = step.get("step", "?")
+        recorded = {k: v for k, v in step.items() if k not in ("step", "at")}
+        steps.append({
+            "name": name,
             "at": step.get("at", ""),
-            "recorded": {k: v for k, v in step.items() if k not in ("step", "at")},
-        }
-        for step in record.get("audit", [])
-    ]
+            "recorded": recorded,
+            "safety": step_safety_flag(name, recorded),
+        })
     return templates.TemplateResponse(
         request, "detail.html",
         {"active": "admin", "record": record, "request_id": request_id,
