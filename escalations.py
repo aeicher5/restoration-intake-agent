@@ -38,9 +38,10 @@ escalations.py` for the offline selftest (no network, no store file).
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 log = logging.getLogger("intake.escalations")
+notify_log = logging.getLogger("intake.notify")
 
 EVENT_KIND = "escalation_event"
 EVENT_OPENED = "escalation_opened"
@@ -115,6 +116,62 @@ def escalation_reasons(record: Mapping[str, Any]) -> "list[str]":
     if not reasons:
         reasons.append(REASON_UNSPECIFIED)
     return reasons
+
+
+# ------------------------------------------------------- life-safety notification
+
+def _log_notifier(payload: Mapping[str, Any]) -> None:
+    """Default channel: one structured WARNING line on the `intake.notify`
+    logger — grep for LIFE_SAFETY_ESCALATION, or point a log shipper at it."""
+    notify_log.warning("LIFE_SAFETY_ESCALATION %s",
+                       json.dumps(payload, separators=(",", ":"), sort_keys=True))
+
+
+# EXTENSION POINT — life-safety notification channels.
+#
+# A channel is `name: callable(payload_dict)`. On every life-safety escalation
+# each channel fires once; the names that succeeded are recorded on the
+# escalation_opened event as `notified`. One failing channel never blocks the
+# others or the customer's request (failures are logged and skipped).
+#
+# To page a human for real, register a channel here — e.g.
+#     NOTIFIERS["sms"] = lambda p: twilio_client.messages.create(...)
+#     NOTIFIERS["pager"] = lambda p: pagerduty.enqueue(...)
+# The payload is deliberately pager-sized: ids, type, matched terms, and a
+# bounded snippet — never the full trail, never any secret.
+NOTIFIERS: "dict[str, Callable[[Mapping[str, Any]], None]]" = {
+    "log": _log_notifier,
+}
+
+_SNIPPET_CHARS = 160
+
+
+def notify_life_safety(record: Mapping[str, Any],
+                       opened_event: Mapping[str, Any]) -> "list[str]":
+    """Fan a life-safety escalation out to every registered channel; returns
+    the channel names that fired (for the opened event's `notified` field)."""
+    text = str(record.get("raw_text", ""))
+    payload = {
+        "alert": "life_safety_escalation",
+        "request_id": record.get("request_id", ""),
+        "received_at": record.get("received_at", ""),
+        "channel": record.get("channel", ""),
+        "request_type": record.get("request_type", ""),
+        "confidence": record.get("confidence", 0.0),
+        "matched_terms": _trail_step(record, "life_safety_screen").get("matched_terms", []),
+        "reasons": list(opened_event.get("reasons", [])),
+        "text_snippet": text[:_SNIPPET_CHARS] + ("…" if len(text) > _SNIPPET_CHARS else ""),
+        "queue": "/admin/queue",
+    }
+    fired: list[str] = []
+    for name, notifier in NOTIFIERS.items():
+        try:
+            notifier(payload)
+            fired.append(name)
+        except Exception:
+            log.exception("life-safety notifier %r failed for %s",
+                          name, payload["request_id"])
+    return fired
 
 
 class EscalationWorkflow:
@@ -240,6 +297,10 @@ class EscalationWorkflow:
             "reasons": escalation_reasons(record),
             "life_safety": record_life_safety(record),
         }
+        if event["life_safety"]:
+            # Notify before appending so the opened event records which
+            # channels actually fired.
+            event["notified"] = notify_life_safety(record, event)
         self.store.append(event)
         log.info("escalation opened for %s (%s)", event["request_id"],
                  ", ".join(event["reasons"]))
@@ -335,6 +396,9 @@ def selftest() -> None:
             "escalate_to_human": escalate, "notes": "n",
             "extras": {"life_safety": life_safety, "status": "analyzed"},
             "audit": [
+                {"step": "life_safety_screen", "at": received_at,
+                 "matched_terms": ["active_fire"] if life_safety else [],
+                 "triggered": life_safety},
                 {"step": "hazard_screen", "at": received_at, "triggered": False},
                 {"step": "finalized", "at": received_at, "action": action,
                  "life_safety": life_safety},
@@ -370,14 +434,32 @@ def selftest() -> None:
     assert state["reasons"] == [REASON_LOW_CONFIDENCE]
 
     # Explicitly opened escalation: open → acknowledged → resolved(corrected).
+    # Opening a life-safety escalation fans out to every notifier; a broken
+    # channel is skipped, never fatal, and only fired channels are recorded.
     fire = rec("req_fire", escalate=True, life_safety=True,
                request_type="fire_smoke_damage",
                received_at="2026-07-08T18:30:00+00:00")
+    fire["raw_text"] = "Our kitchen is on fire right now!"
     store.append(fire)
-    opened = wf.open_for(fire)
+    captured: list[Mapping[str, Any]] = []
+
+    def _boom(payload: Mapping[str, Any]) -> None:
+        raise RuntimeError("pager provider down")
+
+    NOTIFIERS["capture"] = captured.append
+    NOTIFIERS["broken"] = _boom
+    try:
+        opened = wf.open_for(fire)
+    finally:
+        del NOTIFIERS["capture"], NOTIFIERS["broken"]
     assert opened["reasons"][0] == REASON_LIFE_SAFETY and opened["life_safety"]
+    assert opened["notified"] == ["log", "capture"], opened["notified"]
+    assert captured[0]["request_id"] == "req_fire"
+    assert captured[0]["matched_terms"] == ["active_fire"]
+    assert "fire right now" in captured[0]["text_snippet"]
     state = wf.state_of("req_fire")
     assert state["state"] == STATE_OPEN and not state["implicit_open"]
+    assert state["notified"] == ["log", "capture"]
 
     # Queue order: life-safety pinned above the (older) legacy row… and above
     # newer non-life-safety rows too.
