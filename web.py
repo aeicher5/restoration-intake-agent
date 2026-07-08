@@ -55,6 +55,7 @@ from agent import (
     ValidationError,
     load_env,
 )
+from escalations import EscalationWorkflow, is_workflow_event
 
 log = logging.getLogger("intake.web")
 
@@ -86,6 +87,11 @@ class AuditStore:
 
     One JSON object per line, written after every pipeline run. Corrupt lines
     are skipped on read (with a warning) rather than poisoning the admin view.
+
+    The same file also carries escalation-workflow event lines (see
+    escalations.py), appended through the same interface. The record-reading
+    methods below filter them out; read_raw() exposes every line for the
+    workflow to fold.
     """
 
     def __init__(self, path: Path):
@@ -114,14 +120,22 @@ class AuditStore:
                 log.warning("skipping corrupt audit line %s:%d", self.path, line_num)
         return records
 
+    def read_raw(self) -> list[dict[str, Any]]:
+        """Every stored line, oldest first — request records and workflow
+        events alike. The escalation workflow derives state from this."""
+        return self._read_all()
+
+    def _records(self) -> list[dict[str, Any]]:
+        return [line for line in self._read_all() if not is_workflow_event(line)]
+
     def list_newest_first(self) -> list[dict[str, Any]]:
-        return list(reversed(self._read_all()))
+        return list(reversed(self._records()))
 
     def get(self, request_id: str) -> "dict[str, Any] | None":
-        return next((r for r in self._read_all() if r.get("request_id") == request_id), None)
+        return next((r for r in self._records() if r.get("request_id") == request_id), None)
 
     def count(self) -> int:
-        return len(self._read_all())
+        return len(self._records())
 
 
 # ----------------------------------------------------------------- rate limit
@@ -330,6 +344,7 @@ except ConfigError as exc:
     raise SystemExit(f"web.py startup failed: {exc}") from exc
 AGENT = IntakeAgent(SETTINGS)  # constructs the SDK client; no network call yet
 STORE = AuditStore(Path(os.environ.get("INTAKE_AUDIT_LOG", DEFAULT_AUDIT_LOG)))
+WORKFLOW = EscalationWorkflow(STORE)  # escalation state machine over the same store
 
 # POST / triggers a model pipeline run, so it is the endpoint worth guarding.
 # Defaults are generous for a human, tight for a script; env-tunable for ops.
@@ -463,6 +478,14 @@ def intake_submit(request: Request, text: str = Form("")) -> HTMLResponse:
 
     record = make_record(analysis.to_dict())
     STORE.append(record)
+    if record.get("escalate_to_human"):
+        # A failure here must not cost the customer their confirmation page:
+        # an escalated record with no opened event derives as implicitly open,
+        # so the queue still picks it up.
+        try:
+            WORKFLOW.open_for(record)
+        except Exception:
+            log.exception("failed to open escalation for %s", record.get("request_id"))
     return templates.TemplateResponse(
         request, "index.html",
         {"active": "intake", "result": record, "error": None, "text": ""},
@@ -555,7 +578,11 @@ def admin_detail(request: Request, request_id: str) -> Response:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "config": SETTINGS.summary(), "stored_requests": STORE.count()}
+    unresolved = WORKFLOW.queue_entries()
+    return {"status": "ok", "config": SETTINGS.summary(),
+            "stored_requests": STORE.count(),
+            "open_escalations": len(unresolved),
+            "life_safety_open": sum(1 for e in unresolved if e["wf"]["life_safety"])}
 
 
 # ------------------------------------------------------------------ entrypoint
