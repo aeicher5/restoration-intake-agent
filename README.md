@@ -111,3 +111,5 @@ docker run --rm restoration-intake             # runs the offline selftest
 | `ARCHITECTURE.md` | How the system works and what changes at scale |
 | `ORCHESTRATION.md` | How parallel agents built this in an evening — timeline, cost, method |
 | `playbook/` | The parallel-agent build motion, made reusable for any team |
+
+**Where this goes next:** [ROADMAP.md](ROADMAP.md) — the deliberately-not-yet list (event-store spine, multi-tenancy, PII/retention, SSO/roles), written as ready-to-run briefs.
