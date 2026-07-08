@@ -1,5 +1,9 @@
 # Restoration Intake Agent
 
+<!-- ship-time slots (add the file, then the reference — never reference a file that doesn't exist):
+     1. CI badge markdown here (from infra handoff) once .github workflow is merged
+     2. ![evening build timelapse](docs/build-timelapse.gif) if the gif lands -->
+
 An end-to-end AI intake agent for a restoration-services company. A customer
 writes in plain text ("our basement flooded overnight and I'm worried about
 mold") and the system validates, classifies, confidence-checks, escalates to a
@@ -22,6 +26,26 @@ design and its path to production scale in [ARCHITECTURE.md](ARCHITECTURE.md).
 - **The doctrine** — *escalation protects against uncertainty, not miscalibration*;
   that's why safety-critical routing is deterministic code ahead of any model call:
   [ARCHITECTURE.md → Design principles](ARCHITECTURE.md#design-principles-locked-in-the-original-build-kept-tonight).
+
+## The pipeline at a glance
+
+```mermaid
+flowchart LR
+    A["free-text request<br/>(web · CLI · API)"] --> V{"validation gate<br/>(deterministic)"}
+    V -- bad input --> R["rejected<br/>+ reference id"]
+    V --> H{"hazard screen<br/>(deterministic)"}
+    H -- "term match" --> HB["biohazard_cleanup<br/>conf 1.0 → human review"]
+    H --> C["classify: Haiku<br/>(Sonnet fallback,<br/>retry w/ backoff)"]
+    C --> G{"confidence<br/>≥ 0.70?"}
+    G -- yes --> OK["auto-routed"]
+    G -- no --> O["reread: Opus"]
+    O -- "≥ 0.70" --> OK
+    O -- "still low / failed" --> HU["human review"]
+    HB --> T[("audit trail<br/>(every step + why)")]
+    OK --> T
+    HU --> T
+    T --> AD["/admin"]
+```
 
 ![Admin detail view: one request's full audit trail](docs/admin-detail.png)
 *The admin detail view: one request's full audit trail — validation, hazard screen,
