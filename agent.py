@@ -7,13 +7,18 @@ Build stages (from the project plan):
   1. [x] Foundation — env loading, config, data layer, pipeline scaffold (no tools, no LLM)
   2. [x] Deterministic code / tool calls (asserts) — normalization, input validation,
          service-area lookup tool, invariant asserts at the code<->LLM seam, selftest
-  3. [ ] Auditability — JSON of the values at each step (structure baked in at stage 1)
+  3. [x] Auditability — JSON of the values at each step (structure baked in at stage 1)
   4. [x] LLM calls — client.messages.create with output_config.format (structured JSON):
          primary_model classifies, fallback_model retries on failure/refusal, total
          failure degrades to the same fail-safe stub used before this stage
   5. [x] Hardening — confidence-threshold escalation: a read below threshold gets
          one reread on escalation_model; still-low or a failed reread routes to
          a human. Plus --evals: a labeled set scored against the real pipeline.
+         Plus (packaging pass): a deterministic hazard-material screen ahead of
+         the LLM (hazmat phrasing routes straight to biohazard_cleanup + human
+         review — never model-dependent), retry with exponential backoff on
+         transient provider errors, and a Dockerfile that runs --selftest by
+         default.
   6. [x] UX — simple web page (:3000) + JSON API (:8000)
 
 Volume target is MVP: single-request, synchronous, stdlib (+ the `anthropic` SDK) for now.
@@ -32,16 +37,18 @@ Usage:
 import json
 import logging
 import os
+import random
 import re
 import sys
 import threading
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Mapping, MutableMapping
+from typing import Any, Callable, Mapping, MutableMapping
 
 import anthropic
 
@@ -51,6 +58,18 @@ DEFAULT_PRIMARY_MODEL = "claude-haiku-4-5"     # cheap/fast classifier
 DEFAULT_FALLBACK_MODEL = "claude-sonnet-5"     # retries a failed/refused primary-model call
 DEFAULT_ESCALATION_MODEL = "claude-opus-4-8"   # low-confidence rereads (stage 5)
 DEFAULT_CONFIDENCE_THRESHOLD = 0.70            # below this -> opus reread / human (stage 5)
+DEFAULT_MAX_RETRIES = 2                        # transient-error retries per model call
+RETRY_BASE_SECONDS = 0.5                       # first backoff delay; doubles per retry
+RETRY_CAP_SECONDS = 8.0                        # backoff ceiling
+
+# Provider failures worth retrying in place. Anything else fails the attempt
+# immediately: auth/config errors won't heal on retry, and refusals/malformed
+# output are handled by the model fallback chain instead.
+TRANSIENT_API_ERRORS: "tuple[type[Exception], ...]" = (
+    anthropic.APIConnectionError,   # network trouble; includes APITimeoutError
+    anthropic.RateLimitError,       # 429
+    anthropic.InternalServerError,  # 5xx, including 529 overloaded
+)
 
 # Deterministic validation bounds (stage 2). Tune once real volume data arrives.
 MIN_TEXT_CHARS = 10
@@ -126,6 +145,7 @@ class Settings:
     fallback_model: str = DEFAULT_FALLBACK_MODEL
     escalation_model: str = DEFAULT_ESCALATION_MODEL
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD
+    max_retries: int = DEFAULT_MAX_RETRIES
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> "Settings":
@@ -141,12 +161,21 @@ class Settings:
         if not 0.0 <= threshold <= 1.0:
             raise ConfigError(f"INTAKE_CONFIDENCE_THRESHOLD must be in [0, 1], got {threshold}")
 
+        raw_retries = env.get("INTAKE_MAX_RETRIES", str(DEFAULT_MAX_RETRIES))
+        try:
+            max_retries = int(raw_retries)
+        except ValueError as exc:
+            raise ConfigError(f"INTAKE_MAX_RETRIES must be an int, got {raw_retries!r}") from exc
+        if not 0 <= max_retries <= 8:
+            raise ConfigError(f"INTAKE_MAX_RETRIES must be in [0, 8], got {max_retries}")
+
         return cls(
             anthropic_api_key=env["ANTHROPIC_API_KEY"],
             primary_model=env.get("INTAKE_PRIMARY_MODEL", DEFAULT_PRIMARY_MODEL),
             fallback_model=env.get("INTAKE_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL),
             escalation_model=env.get("INTAKE_ESCALATION_MODEL", DEFAULT_ESCALATION_MODEL),
             confidence_threshold=threshold,
+            max_retries=max_retries,
         )
 
     def summary(self) -> dict[str, Any]:
@@ -157,6 +186,7 @@ class Settings:
             "fallback_model": self.fallback_model,
             "escalation_model": self.escalation_model,
             "confidence_threshold": self.confidence_threshold,
+            "max_retries": self.max_retries,
         }
 
 
@@ -260,6 +290,43 @@ def scan_service_area_mentions(text: str) -> dict[str, Any]:
     return {"mentions": mentions, "in_service_area": True if mentions else None}
 
 
+# Hazardous-material vocabulary for the deterministic screen below, label ->
+# word-boundary pattern (matched against normalized lowercase text). The label
+# is what the audit trail reports. Deliberately biased toward over-triggering:
+# a false positive costs one human review, a false negative sends a crew into
+# a hazmat scene. Bare "toxic"/"contaminated" stay off the list — they'd hijack
+# routine mold/flood-water phrasings that the taxonomy already handles.
+HAZARD_TERM_PATTERNS: "dict[str, re.Pattern[str]]" = {
+    label: re.compile(pattern)
+    for label, pattern in {
+        "nuclear": r"\bnuclear\b",
+        "radioactive": r"\bradioactiv\w*\b",
+        "radiation": r"\bradiation\b",
+        "chemical": r"\bchemicals?\b",
+        "sewage": r"\bsewage\b",
+        "sewer": r"\bsewers?\b",
+        "asbestos": r"\basbestos\b",
+        "biohazard": r"\bbio-?hazard\w*\b",
+        "hazmat": r"\bhaz-?mat\b",
+        "hazardous": r"\bhazardous\b",
+        "toxic": r"\btoxic\s+(?:waste|spill|sludge|fumes)\b",
+    }.items()
+}
+
+
+def scan_hazard_terms(text: str) -> list[str]:
+    """Deterministic screen for hazardous-material phrasing (stage-5 hardening).
+
+    Runs ahead of the LLM call: any match short-circuits classification to
+    BIOHAZARD_CLEANUP with escalate_to_human=True. Code owns this decision,
+    not the LLM — hazmat routing must never depend on a model reading.
+    Returns the sorted matched labels (empty when clean) for the audit trail.
+    """
+    lowered = normalize_text(text).lower()
+    return sorted(label for label, pattern in HAZARD_TERM_PATTERNS.items()
+                  if pattern.search(lowered))
+
+
 # ------------------------------------------------------------------- llm classification
 
 # The LLM only ever picks from the real categories — UNKNOWN is reserved for our
@@ -275,7 +342,8 @@ Categories:
 - fire_smoke_damage: fire damage, smoke damage, soot
 - mold_remediation: mold, mildew, musty odor, moisture-driven growth
 - storm_damage: wind, hail, fallen trees, weather-driven roof or structure damage
-- biohazard_cleanup: sewage backup, trauma or crime scenes, hazardous contamination
+- biohazard_cleanup: sewage backup, trauma or crime scenes, hazardous-material \
+contamination or spills (chemical, radioactive or nuclear, asbestos, other toxic substances)
 - reconstruction: rebuilding or repair work following prior damage, no active emergency
 - general_inquiry: pricing, scheduling, or other questions that don't describe active damage
 
@@ -301,13 +369,17 @@ CLASSIFICATION_SCHEMA = {
 class IntakeAgent:
     """Workflow-shaped agent: fixed steps, code-owned control flow."""
 
-    def __init__(self, settings: Settings, client: "anthropic.Anthropic | None" = None):
+    def __init__(self, settings: Settings, client: "anthropic.Anthropic | None" = None,
+                 sleep: "Callable[[float], None]" = time.sleep):
         self.settings = settings
         # Injectable for tests (selftest passes a fake — see below); real runs
         # construct the actual SDK client, which makes no network call itself.
+        # SDK-internal retries are off: _create_with_retry owns the retry
+        # policy, so every attempt is visible in our logs and audit trail.
         self._client = client if client is not None else anthropic.Anthropic(
-            api_key=settings.anthropic_api_key
+            api_key=settings.anthropic_api_key, max_retries=0,
         )
+        self._sleep = sleep  # injectable so selftest can count backoffs without waiting
 
     def handle(self, raw_text: str, channel: str = "web") -> Analysis:
         trail: list[dict[str, Any]] = []
@@ -321,7 +393,28 @@ class IntakeAgent:
         area = scan_service_area_mentions(request.raw_text)
         self._record(trail, "service_area", **area)
 
-        analysis, classify_detail = self._classify(request)
+        hazard_terms = scan_hazard_terms(request.raw_text)
+        self._record(trail, "hazard_screen", matched_terms=hazard_terms,
+                     triggered=bool(hazard_terms))
+
+        if hazard_terms:
+            # Deterministic tier: hazmat phrasing never reaches the LLM. The
+            # 1.0 confidence also guarantees _finalize spends no escalation
+            # reread — the human flag is already set and stays set.
+            analysis = Analysis(
+                request_id=request.request_id,
+                request_type=RequestType.BIOHAZARD_CLEANUP,
+                confidence=1.0,
+                escalate_to_human=True,
+                notes=(f"Hazardous-material terms detected ({', '.join(hazard_terms)}); "
+                       "routed to biohazard cleanup and flagged for human review "
+                       "before dispatch."),
+            )
+            classify_detail: dict[str, Any] = {"classifier": "hazard_term_screen",
+                                               "matched_terms": hazard_terms}
+        else:
+            analysis, classify_detail = self._classify(request)
+            classify_detail = {"classifier": "llm", **classify_detail}
         self._assert_invariants(request, analysis)
         self._record(
             trail,
@@ -396,11 +489,36 @@ class IntakeAgent:
             f"escalate_to_human must be bool, got {type(analysis.escalate_to_human).__name__}"
         )
 
+    def _create_with_retry(self, **kwargs: Any) -> "tuple[Any, int]":
+        """messages.create with exponential backoff on transient provider errors.
+
+        Returns (response, retries_used) so the audit trail records how hard the
+        call had to work. Non-transient errors (auth, bad request, refusal-shaped
+        SDK errors, ...) raise immediately, and the last transient error raises
+        once retries are exhausted — either way the caller's model fallback
+        chain takes over. Never sleeps on the final failure.
+        """
+        retries = self.settings.max_retries
+        for attempt in range(retries + 1):
+            try:
+                return self._client.messages.create(**kwargs), attempt
+            except TRANSIENT_API_ERRORS as exc:
+                if attempt == retries:
+                    raise
+                delay = min(RETRY_CAP_SECONDS, RETRY_BASE_SECONDS * 2 ** attempt)
+                delay *= 0.5 + random.random() / 2  # jitter to 50-100% of target
+                log.warning("transient API error via %s (%s: %s); retry %d/%d in %.1fs",
+                            kwargs.get("model"), type(exc).__name__, exc,
+                            attempt + 1, retries, delay)
+                self._sleep(delay)
+        raise AssertionError("unreachable: retry loop either returns or raises")
+
     def _classify_with_model(self, request: ServiceRequest, model: str) -> tuple[Analysis, dict[str, Any]]:
-        """One classification attempt against `model`. Raises ClassificationError
+        """One classification attempt against `model` (transient provider errors
+        are retried in place — see _create_with_retry). Raises ClassificationError
         (or lets an SDK/parse exception propagate) on any failure — the caller
         decides whether to fall back to the next model."""
-        response = self._client.messages.create(
+        response, retries_used = self._create_with_retry(
             model=model,
             max_tokens=512,
             system=CLASSIFICATION_SYSTEM_PROMPT,
@@ -429,11 +547,14 @@ class IntakeAgent:
             escalate_to_human=False,  # successful automated read; stage 5 adds threshold policy
             notes=str(data["notes"]),
         )
-        usage = {
-            "input_tokens": response.usage.input_tokens,
-            "output_tokens": response.usage.output_tokens,
+        detail = {
+            "usage": {
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens,
+            },
+            "retries": retries_used,
         }
-        return analysis, usage
+        return analysis, detail
 
     def _classify(self, request: ServiceRequest) -> tuple[Analysis, dict[str, Any]]:
         """Stage 4 — LLM classification. Tries primary_model, then falls back to
@@ -444,13 +565,13 @@ class IntakeAgent:
         attempts: list[dict[str, Any]] = []
         for model in (self.settings.primary_model, self.settings.fallback_model):
             try:
-                analysis, usage = self._classify_with_model(request, model)
+                analysis, detail = self._classify_with_model(request, model)
             except Exception as exc:
                 log.warning("classification via %s failed for %s: %s: %s",
                             model, request.request_id, type(exc).__name__, exc)
                 attempts.append({"model": model, "error": f"{type(exc).__name__}: {exc}"})
                 continue
-            attempts.append({"model": model, "usage": usage})
+            attempts.append({"model": model, **detail})
             return analysis, {"model_used": model, "attempts": attempts}
 
         log.error("all classification attempts failed for %s; routing to human review",
@@ -481,7 +602,7 @@ class IntakeAgent:
         log.info("%s below confidence threshold (%.2f < %.2f); escalating to %s",
                   request.request_id, analysis.confidence, threshold, self.settings.escalation_model)
         try:
-            reread, usage = self._classify_with_model(request, self.settings.escalation_model)
+            reread, reread_detail = self._classify_with_model(request, self.settings.escalation_model)
         except Exception as exc:
             log.warning("escalation reread via %s failed for %s: %s: %s",
                         self.settings.escalation_model, request.request_id, type(exc).__name__, exc)
@@ -500,7 +621,7 @@ class IntakeAgent:
             return reread, {
                 "action": "escalated_to_human",
                 "escalation_model": self.settings.escalation_model,
-                "usage": usage,
+                **reread_detail,
             }
 
         log.info("%s escalation reread resolved: %s at %.2f",
@@ -508,7 +629,7 @@ class IntakeAgent:
         return reread, {
             "action": "escalated_resolved",
             "escalation_model": self.settings.escalation_model,
-            "usage": usage,
+            **reread_detail,
         }
 
 
@@ -702,19 +823,26 @@ class UiHandler(_JsonHandler):
 
 
 def serve(settings: Settings, ui_port: int = UI_PORT, api_port: int = API_PORT) -> int:
-    """Run both dev servers (localhost only): UI on :3000, JSON API on :8000."""
+    """Run both dev servers: UI on :3000, JSON API on :8000.
+
+    Binds 127.0.0.1 by default (local dev). Set INTAKE_BIND_HOST=0.0.0.0 when
+    the servers must be reachable across a network namespace boundary — e.g.
+    published ports on a Docker container. Still no auth: keep a reverse proxy
+    in front of anything non-local.
+    """
+    host = os.environ.get("INTAKE_BIND_HOST", "127.0.0.1")
     ApiHandler.agent = IntakeAgent(settings)
     UiHandler.api_port = api_port
 
     try:
-        api_server = ThreadingHTTPServer(("127.0.0.1", api_port), ApiHandler)
+        api_server = ThreadingHTTPServer((host, api_port), ApiHandler)
     except OSError as exc:
-        log.error("cannot bind API port %d (already in use?): %s", api_port, exc)
+        log.error("cannot bind API %s:%d (already in use?): %s", host, api_port, exc)
         return 1
     try:
-        ui_server = ThreadingHTTPServer(("127.0.0.1", ui_port), UiHandler)
+        ui_server = ThreadingHTTPServer((host, ui_port), UiHandler)
     except OSError as exc:
-        log.error("cannot bind UI port %d (already in use?): %s", ui_port, exc)
+        log.error("cannot bind UI %s:%d (already in use?): %s", host, ui_port, exc)
         api_server.server_close()
         return 1
 
@@ -775,10 +903,17 @@ def selftest() -> int:
     assert settings.fallback_model == DEFAULT_FALLBACK_MODEL
     assert settings.escalation_model == DEFAULT_ESCALATION_MODEL
     assert settings.confidence_threshold == DEFAULT_CONFIDENCE_THRESHOLD
+    assert settings.max_retries == DEFAULT_MAX_RETRIES
     for bad_threshold in ("nope", "1.5", "-0.1"):
         try:
             Settings.from_env({"ANTHROPIC_API_KEY": "k", "INTAKE_CONFIDENCE_THRESHOLD": bad_threshold})
             raise AssertionError(f"bad threshold must raise ConfigError: {bad_threshold}")
+        except ConfigError:
+            pass
+    for bad_retries in ("nope", "2.5", "-1", "99"):
+        try:
+            Settings.from_env({"ANTHROPIC_API_KEY": "k", "INTAKE_MAX_RETRIES": bad_retries})
+            raise AssertionError(f"bad retries must raise ConfigError: {bad_retries}")
         except ConfigError:
             pass
 
@@ -793,6 +928,19 @@ def selftest() -> int:
     scan = scan_service_area_mentions(SAMPLE_REQUEST)
     assert scan["mentions"] == ["cedar park"] and scan["in_service_area"] is True, scan
     assert scan_service_area_mentions("no location mentioned here")["in_service_area"] is None
+
+    # hazard-material screen: the deterministic tier ahead of the LLM.
+    # First case is the live-bug regression phrasing (previously misclassified).
+    assert scan_hazard_terms("Nuclear material has spilled all over our yard!") == ["nuclear"]
+    assert scan_hazard_terms("worried about ASBESTOS in the ceiling tiles") == ["asbestos"]
+    assert scan_hazard_terms("sewer line backed up, raw sewage everywhere") == ["sewage", "sewer"]
+    assert scan_hazard_terms("radioactive waste — possible radiation exposure") == ["radiation", "radioactive"]
+    assert scan_hazard_terms("cleaning chemicals spilled in the flooded garage") == ["chemical"]
+    assert scan_hazard_terms("this is a bio-hazard situation, hazmat gear needed") == ["biohazard", "hazmat"]
+    assert scan_hazard_terms("someone dumped toxic waste by our fence") == ["toxic"]
+    assert scan_hazard_terms(SAMPLE_REQUEST) == []
+    assert scan_hazard_terms("black mold behind the tile and a musty smell") == []  # mold-tier, not hazmat
+    assert scan_hazard_terms("the source of the leak is unclear to us") == []       # no substring tricks
 
     # --- LLM classification (stage 4), exercised via a fake client — no network ---
 
@@ -844,6 +992,32 @@ def selftest() -> int:
     assert calls == [settings.primary_model], calls
     classified_step = next(s for s in analysis.audit if s["step"] == "classified")
     assert classified_step["model_used"] == settings.primary_model, classified_step
+    assert classified_step["classifier"] == "llm", classified_step
+    hazard_step = next(s for s in analysis.audit if s["step"] == "hazard_screen")
+    assert hazard_step["triggered"] is False and hazard_step["matched_terms"] == [], hazard_step
+
+    # hazmat phrasing (the live-bug regression case): deterministic screen
+    # classifies + escalates and the LLM is never consulted
+    calls = []
+
+    def llm_must_not_be_called(**kwargs):
+        calls.append(kwargs["model"])
+        return _json_response("water_damage", 0.99, "This read must never be used.")
+
+    agent_hazard = IntakeAgent(settings, client=_FakeClient(llm_must_not_be_called))
+    analysis = agent_hazard.handle("Nuclear material has spilled all over our yard, please help us!")
+    assert analysis.request_type is RequestType.BIOHAZARD_CLEANUP
+    assert analysis.confidence == 1.0
+    assert analysis.escalate_to_human is True
+    assert "nuclear" in analysis.notes
+    assert calls == [], f"hazard-screened request must not reach the LLM: {calls}"
+    hazard_step = next(s for s in analysis.audit if s["step"] == "hazard_screen")
+    assert hazard_step["triggered"] is True and hazard_step["matched_terms"] == ["nuclear"], hazard_step
+    classified_step = next(s for s in analysis.audit if s["step"] == "classified")
+    assert classified_step["classifier"] == "hazard_term_screen", classified_step
+    finalized_step = next(s for s in analysis.audit if s["step"] == "finalized")
+    assert finalized_step["escalate_to_human"] is True, finalized_step
+    json.dumps(analysis.to_dict())  # deterministic path must stay JSON-serializable too
 
     # primary model fails -> falls back to the secondary model
     calls = []
@@ -958,6 +1132,56 @@ def selftest() -> int:
 
     json.dumps(analysis.to_dict())  # output must stay JSON-serializable
 
+    # --- Retry with backoff on transient provider errors (sleep injected) ---
+
+    import httpx  # anthropic's own HTTP dependency; used only to build SDK errors
+
+    def _transient() -> Exception:
+        return anthropic.APIConnectionError(
+            request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+
+    # two transient failures, then success — retried on the SAME model, with backoff
+    calls, sleeps = [], []
+
+    def flaky_then_ok(**kwargs):
+        calls.append(kwargs["model"])
+        if len(calls) < 3:
+            raise _transient()
+        return _json_response("water_damage", 0.9, "Recovered after retries.")
+
+    agent_flaky = IntakeAgent(settings, client=_FakeClient(flaky_then_ok), sleep=sleeps.append)
+    analysis = agent_flaky.handle(SAMPLE_REQUEST)
+    assert analysis.request_type is RequestType.WATER_DAMAGE and analysis.escalate_to_human is False
+    assert calls == [settings.primary_model] * 3, calls
+    assert len(sleeps) == 2 and all(0 < s <= RETRY_CAP_SECONDS for s in sleeps), sleeps
+    classified_step = next(s for s in analysis.audit if s["step"] == "classified")
+    assert classified_step["attempts"][0]["retries"] == 2, classified_step
+
+    # transient errors all the way down -> every model in the chain (primary,
+    # fallback, then the 0.0-confidence stub's escalation reread) exhausts its
+    # retries in order, and the request lands with a human (never a crash)
+    calls, sleeps = [], []
+
+    def always_transient(**kwargs):
+        calls.append(kwargs["model"])
+        raise _transient()
+
+    agent_outage = IntakeAgent(settings, client=_FakeClient(always_transient), sleep=sleeps.append)
+    analysis = agent_outage.handle(SAMPLE_REQUEST)
+    assert analysis.request_type is RequestType.UNKNOWN and analysis.escalate_to_human is True
+    per_model = settings.max_retries + 1
+    assert calls == ([settings.primary_model] * per_model
+                     + [settings.fallback_model] * per_model
+                     + [settings.escalation_model] * per_model), calls
+    assert len(sleeps) == 3 * settings.max_retries, sleeps
+
+    # non-transient errors are NOT retried — no sleeps, straight down the fallback chain
+    sleeps = []
+    agent_hard_fail = IntakeAgent(settings, client=_FakeClient(always_fails), sleep=sleeps.append)
+    analysis = agent_hard_fail.handle(SAMPLE_REQUEST)
+    assert analysis.request_type is RequestType.UNKNOWN and analysis.escalate_to_human is True
+    assert sleeps == [], sleeps
+
     # pipeline rejections: every bad input fails loudly, still carrying an id
     # (validation runs before classify, so any agent — including agent_ok — works)
     rejects = [
@@ -1017,8 +1241,8 @@ def selftest() -> int:
             server.shutdown()
             server.server_close()
 
-    print("selftest: all checks passed (deterministic layer, LLM classification, "
-          "confidence escalation, web handlers)")
+    print("selftest: all checks passed (deterministic layer, hazard screen, LLM "
+          "classification, retry/backoff, confidence escalation, web handlers)")
     return 0
 
 
@@ -1068,8 +1292,6 @@ def evals() -> int:
     change, and this is where to add a case when a real misclassification
     turns up.
     """
-    import time
-
     try:
         load_env()
         settings = Settings.from_env()
