@@ -1,8 +1,9 @@
 # Restoration Intake Agent
 
-<!-- ship-time slots (add the file, then the reference — never reference a file that doesn't exist):
-     1. CI badge markdown here (from infra handoff) once .github workflow is merged
-     2. ![evening build timelapse](docs/build-timelapse.gif) if the gif lands -->
+[![CI](https://github.com/aeicher5/restoration-intake-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/aeicher5/restoration-intake-agent/actions/workflows/ci.yml)
+
+<!-- ship-time slot: ![evening build timelapse](docs/build-timelapse.gif) if the gif lands
+     (never reference a file that doesn't exist) -->
 
 An end-to-end AI intake agent for a restoration-services company. A customer
 writes in plain text ("our basement flooded overnight and I'm worried about
@@ -32,18 +33,21 @@ design and its path to production scale in [ARCHITECTURE.md](ARCHITECTURE.md).
 ```mermaid
 flowchart LR
     A["free-text request<br/>(web · CLI · API)"] --> V{"validation gate<br/>(deterministic)"}
-    V -- bad input --> R["rejected<br/>+ reference id"]
+    V -- "bad input" --> R["rejected + reference id<br/>(trail persisted too)"]
     V --> H{"hazard screen<br/>(deterministic)"}
     H -- "term match" --> HB["biohazard_cleanup<br/>conf 1.0 → human review"]
-    H --> C["classify: Haiku<br/>(Sonnet fallback,<br/>retry w/ backoff)"]
+    H --> LS{"life-safety screen<br/>(deterministic)"}
+    LS -- "match: flag +<br/>force human review" --> C
+    LS --> C["classify: Haiku<br/>(Sonnet fallback,<br/>retry w/ backoff)"]
     C --> G{"confidence<br/>≥ 0.70?"}
-    G -- yes --> OK["auto-routed"]
+    G -- yes --> RE
     G -- no --> O["reread: Opus"]
-    O -- "≥ 0.70" --> OK
+    O -- "≥ 0.70" --> RE
     O -- "still low / failed" --> HU["human review"]
+    HU --> RE["reply: draft → critic<br/>→ ≤1 revision<br/>(fallback: dispatcher note)"]
     HB --> T[("audit trail<br/>(every step + why)")]
-    OK --> T
-    HU --> T
+    R --> T
+    RE --> T
     T --> AD["/admin"]
 ```
 
@@ -74,6 +78,18 @@ python3 demo.py           # seed the admin view: 5 archetypal requests through t
 python3 web.py            # http://localhost:8080 — intake at /, audit trail at /admin
 ```
 
+Ops knobs (all optional; defaults are the localhost posture):
+
+- `PORT` — platform-style port override (`INTAKE_WEB_PORT` still honored).
+- `ADMIN_TOKEN` — set it and `/admin` requires auth: visit
+  `/admin?token=<value>` once, then an HttpOnly cookie takes over. The token
+  is redacted from access logs. Unset = open, for local use only.
+- `INTAKE_RATE_BURST` / `INTAKE_RATE_PER_MINUTE` — per-IP rate limit on
+  `POST /` (defaults: burst 5, 6/min; excess gets 429 + `Retry-After`).
+
+Deploying for real: see [DEPLOY.md](DEPLOY.md) (Railway config-as-code
+included, Render fallback documented).
+
 ### Docker
 
 ```bash
@@ -90,5 +106,8 @@ docker run --rm restoration-intake             # runs the offline selftest
 | `demo.py` | Seed the admin view: 5 archetypal requests through the live pipeline |
 | `evals/` | Extended eval suite, runner, and live results ([evals/README.md](evals/README.md)) |
 | `Dockerfile` | python-slim image, selftest as default CMD |
+| `.github/workflows/ci.yml` | Offline CI on every push (selftest, eval check, web import) — zero secrets |
+| `railway.toml`, `DEPLOY.md` | Config-as-code deploy + step-by-step deploy guide |
 | `ARCHITECTURE.md` | How the system works and what changes at scale |
-| `ORCHESTRATION.md` | How three parallel agents built this in an evening |
+| `ORCHESTRATION.md` | How parallel agents built this in an evening — timeline, cost, method |
+| `playbook/` | The parallel-agent build motion, made reusable for any team |

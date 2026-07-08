@@ -111,3 +111,11 @@ None. One case was known-failing when this suite was written; the record is kept
   smoke-right-now / 911 phrasing, word-boundary matched, zero API calls) ahead of classification:
   it sets `life_safety` on the analysis, forces human escalation, and classification still runs
   normally. The urgency cases above assert it; past-tense fire damage must stay unflagged.
+- **Intended behavior, decided at review: pricing questions escalate.** The built-in suite's
+  pricing case (*"can you give me a rough estimate for what mold remediation typically costs?"*)
+  classifies `general_inquiry` at 0.95 and, since the reply review gate landed, escalates to a
+  human (built-in escalations moved 2/12 → 3/12). The critic refuses to approve any draft that
+  promises costs, so the request falls back to the dispatcher note and routes to a person — on
+  the one case whose honest answer *is* a price, that's the checklist working, not a regression.
+  Pricing answers stay with humans until a real quoting flow exists; teaching the responder to
+  decline pricing questions gracefully is a known one-line prompt change, deliberately deferred.
