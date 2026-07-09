@@ -11,22 +11,15 @@ mold") and the system validates, classifies, confidence-checks, escalates to a
 human when warranted, and records an audit trail of every decision — plus a
 customer intake page and an admin view over that trail.
 
-Started as a **one-hour live build**, then extended the same evening by
-**three Claude Code agents working in parallel git worktrees**. The build
-method is documented in [ORCHESTRATION.md](ORCHESTRATION.md); the system
-design and its path to production scale in [ARCHITECTURE.md](ARCHITECTURE.md).
+Started as a **one-hour live build**, then extended by **three Claude Code
+agents working in parallel git worktrees**. The system design and its path to
+production scale are in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Start here
 
-- **The regression story** — the bug deliberately left in after the first hour
-  (*"nuclear material has spilled all over our yard"* → a **confident** wrong read that
-  sailed past every confidence gate) and how it was killed at the deterministic layer:
-  [evals/README.md → Known failing](evals/README.md#known-failing).
-- **How it was built** — three parallel agents, disjoint file lanes, zero merge
-  conflicts, one evening: [ORCHESTRATION.md](ORCHESTRATION.md).
 - **The doctrine** — *escalation protects against uncertainty, not miscalibration*;
   that's why safety-critical routing is deterministic code ahead of any model call:
-  [ARCHITECTURE.md → Design principles](ARCHITECTURE.md#design-principles-locked-in-the-original-build-kept-tonight).
+  [ARCHITECTURE.md → Design decisions](ARCHITECTURE.md#design-decisions).
 
 ## The pipeline at a glance
 
@@ -112,7 +105,6 @@ docker run --rm restoration-intake             # runs the offline selftest
 | `.github/workflows/` | `ci.yml`: offline CI on every push — zero secrets. `promotion-gate.yml`: prompt/eval changes re-run the live suite before judgment-affecting changes land |
 | `railway.toml`, `DEPLOY.md` | Config-as-code deploy + step-by-step deploy guide |
 | `ARCHITECTURE.md` | How the system works and what changes at scale |
-| `ORCHESTRATION.md` | How parallel agents built this in an evening — timeline, cost, method |
 | `playbook/` | The parallel-agent build motion, made reusable for any team |
 
 **Where this goes next:** [ROADMAP.md](ROADMAP.md) — the deliberately-not-yet list (event-store spine, multi-tenancy, PII/retention, SSO/roles), written as ready-to-run briefs.
