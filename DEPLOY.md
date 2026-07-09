@@ -87,10 +87,17 @@ never in the repo, the image, or `railway.toml`.
   form** are the deploy contract for public exposure: the admin view shows
   every customer's raw request text, and each intake submission spends real
   model calls, so an unthrottled `POST /` is an open wallet.
-- **As of this branch, `web.py` does not yet enforce either** (they land with
-  the web-hardening lane). Until both verify on your build (checklist below),
-  treat the deployment as a private demo: keep the URL unshared, or front it
-  with platform-level protection, and don't put customer data through it.
+- Both are enforced in `web.py`: `/admin` returns 403 without the token, and
+  `POST /` rate-limits per client IP. **Behind a platform edge the limiter
+  only works in proxy-header mode** — the edge presents a different socket
+  peer per request, so keying on the raw peer means no bucket ever repeats
+  (observed live: thirty straight 400s on the checklist probe). That is why
+  `railway.toml`'s start command runs uvicorn with `--proxy-headers
+  --forwarded-allow-ips '*'`, restoring the real client IP from
+  `X-Forwarded-For`; `'*'` is safe on Railway because the edge fronts all
+  traffic. Until both verify on *your* build (checklist below), treat the
+  deployment as a private demo: keep the URL unshared and don't put customer
+  data through it.
 - The per-IP rate limit is in-process and per-instance — another reason
   `numReplicas = 1` matters. Platform edge rate-limiting is a fine belt-and-
   suspenders addition if you have it.

@@ -10,8 +10,12 @@ builder = "NIXPACKS"
 
 [deploy]
 # web.py binds 127.0.0.1 when run directly, so uvicorn is the entrypoint:
-# 0.0.0.0 plus the platform-injected $PORT.
-startCommand = "uvicorn web:app --host 0.0.0.0 --port $PORT"
+# 0.0.0.0 plus the platform-injected $PORT. Proxy-header mode is load-bearing:
+# Railway's edge presents a different socket peer per request, so without it
+# the per-IP rate limiter never sees a repeat client and never trips
+# (observed on first deploy). '*' is safe here because every route to the
+# container traverses that edge.
+startCommand = "uvicorn web:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips '*'"
 healthcheckPath = "/health"
 healthcheckTimeout = 60
 restartPolicyType = "ON_FAILURE"

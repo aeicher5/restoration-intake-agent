@@ -5,3 +5,10 @@
 # Excluding it from uploads makes the Nixpacks pin unconditional.
 Dockerfile
 .dockerignore
+
+# Local secrets and runtime data must never ride the upload archive
+# (the CLI honors .gitignore, but a key should not depend on that).
+.env
+audit_log.jsonl
+evals/corrections.json
+HANDOFF-*.md
