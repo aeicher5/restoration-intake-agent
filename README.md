@@ -13,20 +13,17 @@ over the trail on the back.
 
 It started as a one-hour live build, then got extended the same evening by
 three Claude Code agents working in parallel git worktrees.
-[ORCHESTRATION.md](ORCHESTRATION.md) documents the build method;
 [ARCHITECTURE.md](ARCHITECTURE.md) covers the system design and what changes
 at production scale.
 
 ## Start here
 
-Three things worth reading before the code:
+Two things worth reading before the code:
 
 - The regression story. The first hour deliberately shipped a bug: "nuclear
   material has spilled all over our yard" got a confident wrong read that
   sailed past every confidence gate. How it was fixed at the deterministic
   layer is in [evals/README.md → Known failing](evals/README.md#known-failing).
-- How it was built: three parallel agents, disjoint file lanes, zero merge
-  conflicts, one evening. [ORCHESTRATION.md](ORCHESTRATION.md).
 - Why safety routing is code, not model. The confidence gate catches "I'm not
   sure"; it can't catch confidently wrong. That's why hazmat routing runs as
   deterministic code ahead of any model call:
@@ -117,7 +114,6 @@ docker run --rm restoration-intake             # runs the offline selftest
 | `.github/workflows/` | `ci.yml` runs the offline suite on every push, zero secrets. `promotion-gate.yml` re-runs the live suite before prompt or eval changes land. |
 | `railway.toml`, `DEPLOY.md` | Config-as-code deploy plus the step-by-step guide. |
 | `ARCHITECTURE.md` | How the system works and what changes at scale. |
-| `ORCHESTRATION.md` | How parallel agents built this in an evening: timeline, cost, method. |
 | `playbook/` | The parallel-agent build motion, written up so any team can reuse it. |
 
 Where it goes next: [ROADMAP.md](ROADMAP.md). That's the list of things
