@@ -497,9 +497,15 @@ def _admin_guard(request: Request) -> "Response | None":
 
 @app.get("/", response_class=HTMLResponse)
 def intake_form(request: Request) -> HTMLResponse:
+    # Post/Redirect/Get: after a successful submit the customer lands here
+    # with ?submitted=<id> and the receipt renders from the store — a refresh
+    # re-reads the record instead of re-running the pipeline. Unknown or
+    # missing ids just show the blank form.
+    submitted = request.query_params.get("submitted", "")
+    result = STORE.get(submitted) if submitted else None
     return templates.TemplateResponse(
         request, "index.html",
-        {"active": "intake", "result": None, "error": None, "text": ""},
+        {"active": "intake", "result": result, "error": None, "text": ""},
     )
 
 
@@ -555,10 +561,10 @@ def intake_submit(request: Request, text: str = Form("")) -> HTMLResponse:
             WORKFLOW.open_for(record)
         except Exception:
             log.exception("failed to open escalation for %s", record.get("request_id"))
-    return templates.TemplateResponse(
-        request, "index.html",
-        {"active": "intake", "result": record, "error": None, "text": ""},
-    )
+    # 303 to the GET receipt so a browser refresh can't re-run the pipeline
+    # (or re-bill the model call). Reject/error paths keep their direct
+    # renders — their status codes are the contract.
+    return RedirectResponse(f"/?submitted={record['request_id']}", status_code=303)
 
 
 def build_stats(records: "list[dict[str, Any]]") -> dict[str, Any]:

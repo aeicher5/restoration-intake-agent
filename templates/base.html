@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}Alpine Restoration{% endblock %}</title>
+{% block meta %}{% endblock %}
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2315171E'/%3E%3Cpath d='M16 6C16 6 9 14.5 9 19a7 7 0 0 0 14 0C23 14.5 16 6 16 6Z' fill='%23E4610A'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -37,7 +38,8 @@
 
   /* dispatch-board header: ink band, orange live mark */
   header { background: var(--ink); }
-  nav { max-width: 1020px; margin: 0 auto; padding: .7rem 1.25rem;
+  /* nav, main, and footer share one axis — the page's content width */
+  nav { max-width: calc({{ self.width() }} + 2.5rem); margin: 0 auto; padding: .7rem 1.25rem;
         display: flex; flex-wrap: wrap; gap: .4rem 1.4rem; align-items: baseline; }
   .brand { font-family: var(--display); font-weight: 750; letter-spacing: .01em;
            color: #F4F3EF; margin-right: auto; font-size: 1.02rem; }
@@ -91,9 +93,14 @@
            color: #fff; background: var(--accent); border: 0; border-radius: 6px;
            cursor: pointer; }
   button:hover { background: var(--accent-deep); }
+  button[disabled] { opacity: .65; cursor: progress; }
   button.secondary { background: var(--surface); color: var(--ink);
                      border: 1px solid var(--line-strong); }
   button.secondary:hover { background: #F1EFEA; }
+  .btn-line { display: inline-block; padding: .5rem 1.2rem; border: 1px solid var(--line-strong);
+              border-radius: 6px; color: var(--ink); text-decoration: none;
+              font-weight: 600; font-size: .9rem; background: var(--surface); }
+  .btn-line:hover { background: #F1EFEA; }
 
   .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
           padding: 1.1rem 1.3rem; margin-top: 1.25rem; }
@@ -125,7 +132,7 @@
   .path-arrow { color: var(--faint); font-size: .8rem; }
 
   /* stats strip: ledger numerals */
-  .stats-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
+  .stats-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(126px, 1fr));
                  background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
                  margin-top: 1.4rem; overflow: hidden; }
   .stat { padding: .85rem 1rem .75rem; border-left: 1px solid var(--line);
@@ -256,6 +263,7 @@
   .intake-label { display: block; font-size: .72rem; font-weight: 500; margin-bottom: .35rem;
                   text-transform: uppercase; letter-spacing: .07em; color: var(--slate); }
   .hint { color: var(--faint); font-size: .8rem; margin: .5rem 0 0; }
+  .hint a, .sub a { color: var(--accent-deep); }
   ol.next-steps { list-style: none; counter-reset: step; margin: 2rem 0 0; padding: 0;
                   display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
                   gap: .75rem; }
@@ -273,8 +281,8 @@
              border: 1px solid var(--accent-line); color: var(--accent-deep);
              padding: .15rem .5rem; }
 
-  footer { max-width: 1020px; margin: 2.25rem auto 2.5rem; padding: 0 1.25rem;
-           color: var(--faint); font-size: .78rem; }
+  footer { max-width: calc({{ self.width() }} + 2.5rem); margin: 2.25rem auto 2.5rem;
+           padding: 0 1.25rem; color: var(--faint); font-size: .78rem; }
 
   a:focus-visible, button:focus-visible, select:focus-visible, input:focus-visible,
   textarea:focus-visible, summary:focus-visible {

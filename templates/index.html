@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Alpine Restoration — 24/7 water, fire & mold response · Austin, TX{% endblock %}
+{% block meta %}<meta name="description" content="24/7 water, fire, smoke, and mold restoration in Austin, TX. Describe what happened in your own words — we read it immediately and dispatch the right crew.">{% endblock %}
 {% block chrome %}
   <nav>
     <span class="brand">Alpine Restoration</span>
@@ -8,46 +9,19 @@
   </nav>
 {% endblock %}
 {% block content %}
-<p class="notice warn emergency">If anyone is in danger right now — fire still burning,
-structural collapse, sewage in living space — <strong>call 911 first.</strong>
+<p class="notice warn emergency">If anyone is in danger right now — a fire still burning,
+a gas smell, structural collapse — <strong>call 911 first.</strong>
 Then send this, and we'll take the property from there.</p>
-
-<h1>Tell us what happened</h1>
-<p class="sub">Water, fire, smoke, mold, storm damage — describe it in your own words.
-Your message is read the moment it arrives, day or night, and routed to the right team.</p>
-
-<form method="post" action="/">
-  <label class="intake-label" for="intake-text">Describe the situation</label>
-  <textarea id="intake-text" name="text" placeholder="e.g. Our basement flooded overnight after the storm — standing water everywhere, and I'm worried about mold. We're in Cedar Park."
-    >{{ text }}</textarea>
-  <p class="hint">Fastest if you include what happened, where you are, and how long it's
-  been going on. You'll get a reference number right away.</p>
-  <button type="submit">Send request</button>
-  <p class="hint">Prefer to talk? Call <a href="tel:+15125550148">(512) 555-0148</a> —
-  a person answers any hour.</p>
-</form>
-
-<ol class="next-steps">
-  <li><b>Read immediately.</b> Our intake system assesses your message the moment it lands.</li>
-  <li><b>Routed right.</b> It goes straight to the matching crew — anything urgent or
-  unclear goes to a human coordinator.</li>
-  <li><b>Tracked.</b> Your reference number follows the request from first read to dispatch.</li>
-</ol>
-
-{% if error %}
-<div class="card error">
-  <strong>We couldn't process that.</strong> {{ error }}
-  {% if error_request_id %}<br><small class="muted">reference: {{ error_request_id }}</small>{% endif %}
-</div>
-{% endif %}
 
 {% if result %}
 {% set type_label = 'pending review' if result.request_type == 'unknown'
                     else result.request_type.replace('_', ' ') %}
-<div class="card result-card">
-  <h2>Request received ✓</h2>
-  <p class="ref-line">Your reference: <code class="ref">{{ result.request_id }}</code> —
-  keep it handy, it identifies this request from here on.</p>
+<h1>We're on it</h1>
+<p class="sub">Your request is in our system, and a coordinator sees it the moment it's
+needed. Keep the reference number — it identifies this request from here on.</p>
+<div class="card result-card" style="margin-top:0">
+  <p class="ref-line" style="margin-top:0">Your reference:
+  <code class="ref">{{ result.request_id }}</code></p>
   <dl>
     <dt>assessed as</dt><dd><span class="chip">{{ type_label }}</span></dd>
     <dt>confidence</dt><dd>{{ "%.2f"|format(result.confidence) }}</dd>
@@ -70,6 +44,48 @@ Your message is read the moment it arrives, day or night, and routed to the righ
   </div>
   {% endif %}
 </div>
+<p style="margin-top:1.35rem"><a class="btn-line" href="/">Send another request</a></p>
+
+{% else %}
+<h1>Tell us what happened</h1>
+<p class="sub">Water, fire, smoke, mold, storm damage — describe it in your own words.
+Your message is read the moment it arrives, day or night, and routed to the right team.</p>
+
+<form method="post" action="/">
+  <label class="intake-label" for="intake-text">Describe the situation</label>
+  <textarea id="intake-text" name="text" required minlength="10" maxlength="8000"
+    placeholder="e.g. Our basement flooded overnight after the storm — standing water everywhere, and I'm worried about mold. We're in Cedar Park."
+    >{{ text }}</textarea>
+  <p class="hint">Fastest if you include what happened, where you are, and how long it's
+  been going on. You'll get a reference number right away.</p>
+  <button type="submit">Send request</button>
+  <p class="hint">Prefer to talk? Call <a href="tel:+15125550148">(512) 555-0148</a> —
+  a person answers any hour.</p>
+</form>
+
+{% if error %}
+<div class="card error">
+  <strong>We couldn't process that.</strong> {{ error }}
+  {% if error_request_id %}<br><small class="muted">reference: {{ error_request_id }}</small>{% endif %}
+</div>
+{% endif %}
+
+<ol class="next-steps">
+  <li><b>Read immediately.</b> Our intake system assesses your message the moment it lands.</li>
+  <li><b>Routed right.</b> It goes straight to the matching crew — anything urgent or
+  unclear goes to a human coordinator.</li>
+  <li><b>Tracked.</b> Your reference number follows the request from first read to dispatch.</li>
+</ol>
+
+<script>
+  // The pipeline takes a few seconds; hold the button so an anxious
+  // double-click can't file the same emergency twice.
+  document.querySelector("form").addEventListener("submit", (event) => {
+    const button = event.target.querySelector("button[type=submit]");
+    button.disabled = true;
+    button.textContent = "Sending…";
+  });
+</script>
 {% endif %}
 {% endblock %}
 {% block footer %}<span class="foot-brand">Alpine Restoration</span><span class="foot-sep">·</span>
