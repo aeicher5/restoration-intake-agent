@@ -12,7 +12,7 @@
          -webkit-font-smoothing: antialiased; }
   header { background: #fff; border-bottom: 1px solid #dde1e5; }
   nav { max-width: 960px; margin: 0 auto; padding: .65rem 1rem;
-        display: flex; gap: 1.1rem; align-items: baseline; }
+        display: flex; flex-wrap: wrap; gap: .4rem 1.1rem; align-items: baseline; }
   .brand { font-weight: 700; margin-right: auto; }
   nav a { color: #5b6570; text-decoration: none; font-size: .9rem; padding-bottom: .15rem; }
   nav a.on { color: #1c6e45; font-weight: 600; border-bottom: 2px solid #1c6e45; }
@@ -41,12 +41,12 @@
   .chip.warn { background: #fde8cd; color: #8a4b00; }
   .chip.good { background: #d9f2e4; color: #14532d; }
   .path-chain { display: inline-flex; flex-wrap: wrap; gap: .3rem .4rem; align-items: center; }
-  .path-arrow { color: #8a939c; font-size: .8rem; }
+  .path-arrow { color: #6f7a84; font-size: .8rem; }
   code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85em;
          background: #f6f8fa; padding: .1rem .3rem; border-radius: 4px; }
   pre { overflow-x: auto; background: #f6f8fa; padding: .75rem; border-radius: 8px;
         font-size: .8rem; margin: .4rem 0 0; }
-  .muted { color: #8a939c; }
+  .muted { color: #6f7a84; }
   .stats-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
                  background: #fff; border: 1px solid #dde1e5; border-radius: 10px;
                  margin-top: 1.25rem; overflow: hidden; }
@@ -55,7 +55,7 @@
   .stat:first-child { border-left: 0; }
   .stat-label { color: #5b6570; font-size: .75rem; }
   .stat-value { font-size: 1.35rem; font-weight: 600; line-height: 1.15; }
-  .stat-sub { color: #8a939c; font-size: .75rem; }
+  .stat-sub { color: #6f7a84; font-size: .75rem; }
   .type-mix { margin-top: .6rem; display: flex; flex-wrap: wrap; gap: .4rem;
               align-items: baseline; }
   .type-mix .chip b { font-weight: 600; color: #5b6570; }
@@ -91,7 +91,7 @@
   tbody tr.escalated { background: #fffaf3; }
   tbody tr.escalated:hover { background: #fdf3e3; }
   td a { color: #1c6e45; text-decoration: none; }
-  .empty { text-align: center; padding: 2.5rem 1rem; color: #8a939c; }
+  .empty { text-align: center; padding: 2.5rem 1rem; color: #6f7a84; }
   .step { background: #fff; border: 1px solid #dde1e5; border-radius: 10px;
           padding: .9rem 1.1rem; margin-bottom: .75rem;
           box-shadow: 0 1px 2px rgba(15, 23, 32, .04); }
@@ -104,7 +104,7 @@
   dd.reply { white-space: pre-line; }
   .step-head { display: flex; align-items: baseline; gap: 1rem; }
   .step-head h3 { margin: 0; font-size: .95rem; }
-  .step-head .at { margin-left: auto; color: #8a939c; font-size: .8rem;
+  .step-head .at { margin-left: auto; color: #6f7a84; font-size: .8rem;
                    font-variant-numeric: tabular-nums; }
   /* audit-step field ledger */
   .step-fields { margin-top: .55rem; font-size: .875rem;
@@ -118,14 +118,14 @@
   details.field-json[open] summary { margin-bottom: .2rem; }
   details.field-json pre { margin: 0; }
   footer { max-width: 960px; margin: 2rem auto 2.5rem; padding: 0 1rem;
-           color: #8a939c; font-size: .8rem; }
+           color: #6f7a84; font-size: .8rem; }
   /* escalation queue */
   .esc-card { background: #fff; border: 1px solid #dde1e5; border-radius: 10px;
               padding: .9rem 1.1rem; margin-top: .9rem;
               box-shadow: 0 1px 2px rgba(15, 23, 32, .04); }
   .esc-card.life-safety { border-left: 4px solid #cf3f3f; background: #fffbfa; }
   .esc-head { display: flex; flex-wrap: wrap; gap: .4rem .6rem; align-items: baseline; }
-  .esc-head .at { margin-left: auto; color: #8a939c; font-size: .8rem;
+  .esc-head .at { margin-left: auto; color: #6f7a84; font-size: .8rem;
                   font-variant-numeric: tabular-nums; }
   .esc-text { margin: .55rem 0 .15rem; }
   .esc-meta { margin: 0; color: #5b6570; font-size: .85rem; }
@@ -158,6 +158,12 @@
   .notice { margin-top: 1rem; padding: .6rem 1rem; border-radius: 8px; font-size: .9rem; }
   .notice.ok { background: #d9f2e4; color: #14532d; border: 1px solid #b7e2cb; }
   .notice.warn { background: #fde8cd; color: #8a4b00; border: 1px solid #f3d3a1; }
+  a:focus-visible, button:focus-visible, select:focus-visible, input:focus-visible,
+  textarea:focus-visible, summary:focus-visible {
+    outline: 2px solid #1c6e45; outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) {
+    .badge.danger.pulse { animation: none; }
+  }
 </style>
 </head>
 <body>

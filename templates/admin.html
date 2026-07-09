@@ -22,7 +22,7 @@
     <span class="stat-sub">{% if queue_counts.life_safety %}{{ queue_counts.life_safety }} life-safety · {% endif %}<a href="/admin/queue">work the queue →</a></span>
   </div>
   <div class="stat">
-    <span class="stat-label">Opus rereads</span>
+    <span class="stat-label">Escalation rereads</span>
     <span class="stat-value">{{ stats.rereads }}</span>
     <span class="stat-sub">low-confidence second opinions</span>
   </div>
@@ -91,13 +91,13 @@
 <table>
   <thead>
     <tr>
-      <th>Received</th>
-      <th>Request</th>
-      <th>Type</th>
-      <th>Conf.</th>
-      <th>Routing</th>
-      <th>Cost</th>
-      <th>Customer text</th>
+      <th scope="col">Received</th>
+      <th scope="col">Request</th>
+      <th scope="col">Type</th>
+      <th scope="col">Conf.</th>
+      <th scope="col">Routing</th>
+      <th scope="col">Cost</th>
+      <th scope="col">Customer text</th>
     </tr>
   </thead>
   <tbody>

@@ -68,7 +68,7 @@ Refreshes itself every 30 seconds unless you're mid-action.</p>
         <option value="{{ t }}"{% if t == r.request_type %} selected{% endif %}>{{ t.replace('_', ' ') }}{% if t == r.request_type %} — as classified{% endif %}</option>
         {% endfor %}
       </select>
-      <input type="text" name="note" maxlength="500"
+      <input type="text" name="note" maxlength="500" aria-label="Resolution note"
              placeholder="note — what you verified or decided (optional)">
       <button type="submit">Resolve</button>
     </form>
