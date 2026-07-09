@@ -38,8 +38,9 @@
 
   /* dispatch-board header: ink band, orange live mark */
   header { background: var(--ink); }
-  /* nav, main, and footer share one axis — the page's content width */
-  nav { max-width: calc({{ self.width() }} + 2.5rem); margin: 0 auto; padding: .7rem 1.25rem;
+  /* nav, main, and footer share one axis: same max-width, same side padding,
+     border-box everywhere — so all three land on identical content edges */
+  nav { max-width: {{ self.width() }}; margin: 0 auto; padding: .7rem 1.25rem;
         display: flex; flex-wrap: wrap; gap: .4rem 1.4rem; align-items: baseline; }
   .brand { font-family: var(--display); font-weight: 750; letter-spacing: .01em;
            color: #F4F3EF; margin-right: auto; font-size: 1.02rem; }
@@ -281,7 +282,7 @@
              border: 1px solid var(--accent-line); color: var(--accent-deep);
              padding: .15rem .5rem; }
 
-  footer { max-width: calc({{ self.width() }} + 2.5rem); margin: 2.25rem auto 2.5rem;
+  footer { max-width: {{ self.width() }}; margin: 2.25rem auto 2.5rem;
            padding: 0 1.25rem; color: var(--faint); font-size: .78rem; }
 
   a:focus-visible, button:focus-visible, select:focus-visible, input:focus-visible,
