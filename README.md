@@ -39,7 +39,7 @@ flowchart LR
     H --> LS{"life-safety screen<br/>(deterministic)"}
     LS -- "match: flag +<br/>force human review" --> C
     LS --> C["classify: Haiku<br/>(Sonnet fallback,<br/>retry w/ backoff)"]
-    C --> G{"confidence ≥ bar?<br/>(0.70 global; 0.85 floor<br/>biohazard & fire)"}
+    C --> G{"confidence ≥ bar?<br/>(0.70 global · 0.85 floor for<br/>biohazard, fire)"}
     G -- yes --> RE
     G -- no --> O["reread: Opus"]
     O -- "clears its bar" --> RE
