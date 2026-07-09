@@ -114,7 +114,6 @@ docker run --rm restoration-intake             # runs the offline selftest
 | `.github/workflows/` | `ci.yml` runs the offline suite on every push, zero secrets. `promotion-gate.yml` re-runs the live suite before prompt or eval changes land. |
 | `railway.toml`, `DEPLOY.md` | Config-as-code deploy plus the step-by-step guide. |
 | `ARCHITECTURE.md` | How the system works and what changes at scale. |
-| `playbook/` | The parallel-agent build motion, written up so any team can reuse it. |
 
 Where it goes next: [ROADMAP.md](ROADMAP.md). That's the list of things
 deliberately not built yet (event-store spine, multi-tenancy, PII and

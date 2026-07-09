@@ -1,10 +1,9 @@
 # Roadmap
 
-These are the things deliberately not built yet. Each entry follows
-[playbook/BRIEF-TEMPLATE.md](playbook/BRIEF-TEMPLATE.md): a mission, concrete
-deliverables, and done-criteria you can actually verify, so whoever picks one
-up doesn't have to reconstruct the intent first. The order matters: the
-event-store spine unlocks the other three.
+These are the things deliberately not built yet. Each entry has a mission,
+concrete deliverables, and done-criteria you can actually verify, so whoever
+picks one up doesn't have to reconstruct the intent first. The order matters:
+the event-store spine unlocks the other three.
 
 One piece of shared context. The design decisions in
 [ARCHITECTURE.md](ARCHITECTURE.md) still apply to all of these (staged
