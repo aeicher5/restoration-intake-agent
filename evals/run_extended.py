@@ -171,6 +171,20 @@ def judge(case: dict[str, Any], outcome: str, analysis: "agent.Analysis | None",
             and not str(reply_step.get("reply") or "").startswith(agent.LIFE_SAFETY_REPLY_OPENER)):
         return False, "drafted life-safety reply missing the 911 opener (pipeline invariant)"
 
+    # Per-class threshold invariant (config 1.2.0), checked on every analyzed
+    # case: the finalized step records the effective confidence bar the final
+    # read was gated on (per-class floor or global — whatever the running
+    # config says, so this stays correct under env overrides). A read that
+    # landed below that bar and was NOT escalated is a pipeline bug.
+    finalized = next((s for s in getattr(analysis, "audit", [])
+                      if s.get("step") == "finalized"), None)
+    if finalized is not None and isinstance(finalized.get("confidence_threshold"), (int, float)):
+        bar = finalized["confidence_threshold"]
+        if analysis.confidence < bar and not escalated:
+            return False, (f"confidence {analysis.confidence:.2f} below its effective "
+                           f"threshold {bar:.2f} ({finalized.get('threshold_source', '?')}) "
+                           "yet not escalated (pipeline invariant)")
+
     if expect.get("pass_if_escalated") and escalated:
         return True, f"routed to human (acceptable for this case); read was {got_type}"
 
@@ -365,6 +379,24 @@ def check(cases: list[dict[str, Any]]) -> int:
     water_reply = with_reply(synthetic(agent.RequestType.WATER_DAMAGE, 0.9, False),
                              "drafted", "Thank you — our team will be in touch shortly.")
 
+    # Per-class threshold synthetics: the scorer's invariant reads the
+    # finalized step's recorded bar, so a below-bar unescalated read must fail
+    # even when the type expectation is met.
+    def with_finalized(analysis: agent.Analysis, threshold: float, source: str) -> agent.Analysis:
+        analysis.audit = [*analysis.audit,
+                          {"step": "finalized", "confidence_threshold": threshold,
+                           "threshold_source": source}]
+        return analysis
+
+    fire_below_floor_unescalated = with_finalized(
+        synthetic(agent.RequestType.FIRE_SMOKE_DAMAGE, 0.80, False),
+        0.85, "class:fire_smoke_damage")
+    fire_below_floor_escalated = with_finalized(
+        synthetic(agent.RequestType.FIRE_SMOKE_DAMAGE, 0.80, True),
+        0.85, "class:fire_smoke_damage")
+    water_above_global = with_finalized(
+        synthetic(agent.RequestType.WATER_DAMAGE, 0.75, False), 0.70, "global")
+
     scenarios = [  # (expect, outcome, analysis, should_pass)
         ({"outcome": "analyzed", "types": ["water_damage"]}, "analyzed", water, True),
         ({"outcome": "analyzed", "life_safety": True}, "analyzed", fire_life_safety, True),
@@ -390,6 +422,14 @@ def check(cases: list[dict[str, Any]]) -> int:
         ({"outcome": "analyzed", "life_safety": True}, "analyzed", fire_reply_bad, False),
         ({"outcome": "analyzed", "life_safety": True}, "analyzed", fire_reply_fallback, True),
         ({"outcome": "analyzed", "types": ["water_damage"]}, "analyzed", water_reply, True),
+        # per-class threshold invariant: below the recorded effective bar and
+        # unescalated fails even with the type expectation met; escalated is
+        # fine; above the (global) bar is fine
+        ({"outcome": "analyzed", "types": ["fire_smoke_damage"]},
+         "analyzed", fire_below_floor_unescalated, False),
+        ({"outcome": "analyzed", "types": ["fire_smoke_damage"], "pass_if_escalated": True},
+         "analyzed", fire_below_floor_escalated, True),
+        ({"outcome": "analyzed", "types": ["water_damage"]}, "analyzed", water_above_global, True),
         ({"outcome": "rejected"}, "rejected", None, True),
         ({"outcome": "rejected"}, "analyzed", water, False),
         ({"outcome": "analyzed", "types": ["water_damage"]}, "rejected", None, False),

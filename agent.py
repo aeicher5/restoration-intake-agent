@@ -34,6 +34,7 @@ Usage:
     python3 agent.py --serve             # web UI on http://localhost:3000, JSON API on :8000
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -43,7 +44,7 @@ import sys
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -199,6 +200,7 @@ class Settings:
             "escalation_model": self.escalation_model,
             "confidence_threshold": self.confidence_threshold,
             "max_retries": self.max_retries,
+            "prompt_config": PROMPT_CONFIG.summary(),
         }
 
 
@@ -471,6 +473,114 @@ REPLY_CRITIC_SCHEMA = {
 }
 
 
+# ------------------------------------------- versioned prompt/config surface
+
+@dataclass(frozen=True)
+class PromptConfig:
+    """The promotion artifact: every prompt and threshold the pipeline's
+    behavior depends on, under one explicit version string.
+
+    This is the surface the CI promotion gate keys on — change anything here
+    (or the literals it aggregates) and the eval suite must pass before the
+    change promotes. The version says what humans intended; `fingerprint()`
+    says what the content actually is, so the audit trail can prove which
+    exact prompt/threshold set classified a given request even if someone
+    edits a prompt without bumping the version.
+
+    `confidence_threshold` is the versioned *default*; Settings may override
+    it at runtime via INTAKE_CONFIDENCE_THRESHOLD (the audit trail records
+    the effective value on every request either way).
+
+    `class_confidence_thresholds` are per-class floors on top of the global
+    threshold, keyed by RequestType value. Rationale: a model read that
+    routes a crew *toward* a safety-relevant class carries asymmetric
+    misroute cost — sending people expecting a routine job into what is
+    actually hazmat/fire territory (or vice versa) is far more expensive
+    than one extra Opus reread or human review. So those reads must clear a
+    higher bar before they pass unescalated. Floors only ever tighten: the
+    effective threshold for a class is max(global, class floor) — see
+    effective_confidence_threshold(). Classes not listed use the global
+    fallback (0.70 by default).
+    """
+
+    version: str
+    classification_system_prompt: str
+    responder_system_prompt: str
+    reply_critic_system_prompt: str
+    confidence_threshold: float
+    class_confidence_thresholds: "Mapping[str, float]" = field(default_factory=dict)
+
+    def fingerprint(self) -> str:
+        """Stable 12-hex-char content hash of the whole surface."""
+        payload = json.dumps(asdict(self), sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+    def summary(self) -> dict[str, Any]:
+        """Loggable view (reaches /health): version + fingerprint + thresholds,
+        never the prompt text itself."""
+        return {
+            "version": self.version,
+            "fingerprint": self.fingerprint(),
+            "confidence_threshold": self.confidence_threshold,
+            "class_confidence_thresholds": dict(self.class_confidence_thresholds),
+        }
+
+
+# Version history — bump on ANY change to a prompt or threshold in this
+# surface (the CI promotion gate runs the eval suite on every such change):
+#   1.0.0  original one-hour build: classification prompt, global 0.70 threshold
+#   1.1.0  post-nuclear-regression hardening + product pass: biohazard bullet
+#          names chemical/radioactive/nuclear/asbestos explicitly; responder
+#          and reply-critic prompts added behind the review gate
+#   1.2.0  per-class confidence floors: biohazard_cleanup and fire_smoke_damage
+#          reads must clear 0.85 (vs the 0.70 global) before passing unescalated
+PROMPT_CONFIG = PromptConfig(
+    version="1.2.0",
+    classification_system_prompt=CLASSIFICATION_SYSTEM_PROMPT,
+    responder_system_prompt=RESPONDER_SYSTEM_PROMPT,
+    reply_critic_system_prompt=REPLY_CRITIC_SYSTEM_PROMPT,
+    confidence_threshold=DEFAULT_CONFIDENCE_THRESHOLD,
+    # Default floors, chosen against misroute cost, not model behavior:
+    #   biohazard_cleanup 0.85 — a wrong read in either direction near hazmat
+    #       means a crew walks in with the wrong protective posture. (Obvious
+    #       hazmat phrasing never gets this far — the deterministic screen
+    #       short-circuits it at confidence 1.0; this floor guards the
+    #       *model-read* biohazard calls on subtler phrasing.)
+    #   fire_smoke_damage 0.85 — fire routing sits next to the life-safety
+    #       tier; a shaky fire read deserves a second opinion before it
+    #       passes as routine intake. (Active-fire phrasing is already
+    #       force-escalated by the deterministic life-safety screen.)
+    # Everything else: cheap to misroute (a water/mold/storm mix-up costs a
+    # phone call), so the global 0.70 fallback stands.
+    class_confidence_thresholds={
+        RequestType.BIOHAZARD_CLEANUP.value: 0.85,
+        RequestType.FIRE_SMOKE_DAMAGE.value: 0.85,
+    },
+)
+
+
+def effective_confidence_threshold(
+    request_type: RequestType,
+    global_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
+    config: "PromptConfig | None" = None,
+) -> "tuple[float, str]":
+    """The confidence bar a read of `request_type` must clear, and why.
+
+    Returns (threshold, source) where source is "global" or
+    "class:<request_type>". Per-class values are floors: they apply only when
+    they *raise* the bar above the global threshold (which INTAKE_CONFIDENCE_
+    THRESHOLD may have moved at runtime) — so operators can tighten globally
+    without a class entry silently loosening below it. The threshold is
+    evaluated against the type each read actually reports: an escalation
+    reread that lands on a different class is judged against that class's bar.
+    """
+    cfg = config if config is not None else PROMPT_CONFIG
+    class_floor = cfg.class_confidence_thresholds.get(request_type.value)
+    if class_floor is not None and class_floor > global_threshold:
+        return class_floor, f"class:{request_type.value}"
+    return global_threshold, "global"
+
+
 # ------------------------------------------------------------------------- pipeline
 
 class IntakeAgent:
@@ -541,6 +651,10 @@ class IntakeAgent:
             "classified",
             request_type=analysis.request_type.value,
             confidence=analysis.confidence,
+            # Which exact prompt/threshold artifact made this read — on every
+            # classified step, deterministic and LLM paths alike.
+            prompt_config_version=PROMPT_CONFIG.version,
+            prompt_config_fingerprint=PROMPT_CONFIG.fingerprint(),
             **classify_detail,
         )
 
@@ -572,7 +686,8 @@ class IntakeAgent:
             confidence=analysis.confidence,
             escalate_to_human=analysis.escalate_to_human,
             life_safety=analysis.life_safety,
-            confidence_threshold=self.settings.confidence_threshold,
+            # finalize_detail carries confidence_threshold + threshold_source:
+            # the effective (per-class aware) bar the returned read was gated on.
             **finalize_detail,
         )
 
@@ -667,7 +782,7 @@ class IntakeAgent:
         response, retries_used = self._create_with_retry(
             model=model,
             max_tokens=512,
-            system=CLASSIFICATION_SYSTEM_PROMPT,
+            system=PROMPT_CONFIG.classification_system_prompt,
             messages=[{"role": "user", "content": request.raw_text}],
             output_config={"format": {"type": "json_schema", "schema": CLASSIFICATION_SCHEMA}},
         )
@@ -732,21 +847,28 @@ class IntakeAgent:
         return stub, {"model_used": None, "attempts": attempts}
 
     def _finalize(self, request: ServiceRequest, analysis: Analysis) -> tuple[Analysis, dict[str, Any]]:
-        """Stage 5 — confidence-threshold escalation.
+        """Stage 5 — confidence-threshold escalation, per-class aware.
 
-        A read at or above confidence_threshold passes through untouched. Below
-        threshold, get one reread from escalation_model (opus) — a second,
-        stronger opinion. If that reread is itself still below threshold, or the
-        reread attempt fails outright, route to a human — but keep whichever
-        automated read we have (the reread if we got one, otherwise the
-        original), rather than discarding it.
+        A read at or above its effective threshold — the global default, or a
+        higher per-class floor for safety-relevant classes (see
+        effective_confidence_threshold) — passes through untouched. Below it,
+        get one reread from escalation_model (opus) — a second, stronger
+        opinion, judged against the bar for whatever class *it* reports. If
+        that reread is itself still below its threshold, or the reread attempt
+        fails outright, route to a human — but keep whichever automated read
+        we have (the reread if we got one, otherwise the original), rather
+        than discarding it. The detail always records the threshold that
+        gated the returned read, and where it came from.
         """
-        threshold = self.settings.confidence_threshold
+        threshold, source = effective_confidence_threshold(
+            analysis.request_type, self.settings.confidence_threshold)
         if analysis.confidence >= threshold:
-            return analysis, {"action": "passed"}
+            return analysis, {"action": "passed",
+                              "confidence_threshold": threshold, "threshold_source": source}
 
-        log.info("%s below confidence threshold (%.2f < %.2f); escalating to %s",
-                  request.request_id, analysis.confidence, threshold, self.settings.escalation_model)
+        log.info("%s below confidence threshold (%.2f < %.2f [%s]); escalating to %s",
+                  request.request_id, analysis.confidence, threshold, source,
+                  self.settings.escalation_model)
         try:
             reread, reread_detail = self._classify_with_model(request, self.settings.escalation_model)
         except Exception as exc:
@@ -758,23 +880,34 @@ class IntakeAgent:
                 "action": "escalation_failed",
                 "escalation_model": self.settings.escalation_model,
                 "error": f"{type(exc).__name__}: {exc}",
+                "confidence_threshold": threshold,
+                "threshold_source": source,
             }
 
+        # The reread may land on a different class than the original read did;
+        # it is judged against the bar for the class it actually reports.
+        threshold, source = effective_confidence_threshold(
+            reread.request_type, self.settings.confidence_threshold)
         if reread.confidence < threshold:
-            log.info("%s escalation reread still below threshold (%.2f < %.2f); routing to human",
-                      request.request_id, reread.confidence, threshold)
+            log.info("%s escalation reread still below threshold (%.2f < %.2f [%s]); routing to human",
+                      request.request_id, reread.confidence, threshold, source)
             reread.escalate_to_human = True
             return reread, {
                 "action": "escalated_to_human",
                 "escalation_model": self.settings.escalation_model,
+                "confidence_threshold": threshold,
+                "threshold_source": source,
                 **reread_detail,
             }
 
-        log.info("%s escalation reread resolved: %s at %.2f",
-                  request.request_id, reread.request_type.value, reread.confidence)
+        log.info("%s escalation reread resolved: %s at %.2f (threshold %.2f [%s])",
+                  request.request_id, reread.request_type.value, reread.confidence,
+                  threshold, source)
         return reread, {
             "action": "escalated_resolved",
             "escalation_model": self.settings.escalation_model,
+            "confidence_threshold": threshold,
+            "threshold_source": source,
             **reread_detail,
         }
 
@@ -845,7 +978,7 @@ class IntakeAgent:
         response, retries_used = self._create_with_retry(
             model=self.settings.primary_model,
             max_tokens=300,
-            system=RESPONDER_SYSTEM_PROMPT,
+            system=PROMPT_CONFIG.responder_system_prompt,
             messages=[{"role": "user", "content": json.dumps(directives, ensure_ascii=False)}],
         )
         if response.stop_reason == "refusal":
@@ -888,7 +1021,7 @@ class IntakeAgent:
         response, retries_used = self._create_with_retry(
             model=self.settings.primary_model,
             max_tokens=300,
-            system=REPLY_CRITIC_SYSTEM_PROMPT,
+            system=PROMPT_CONFIG.reply_critic_system_prompt,
             messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
             output_config={"format": {"type": "json_schema", "schema": REPLY_CRITIC_SCHEMA}},
         )
@@ -1203,6 +1336,49 @@ def selftest() -> int:
         except ConfigError:
             pass
 
+    # versioned prompt/config surface (the promotion artifact): explicit
+    # version, content fingerprint, and the public module-level names staying
+    # exactly aliased to it — backward compatibility is load-bearing (web.py,
+    # the eval runners, and this selftest all consume the module-level names).
+    assert re.fullmatch(r"\d+\.\d+\.\d+", PROMPT_CONFIG.version), PROMPT_CONFIG.version
+    assert PROMPT_CONFIG.classification_system_prompt == CLASSIFICATION_SYSTEM_PROMPT
+    assert PROMPT_CONFIG.responder_system_prompt == RESPONDER_SYSTEM_PROMPT
+    assert PROMPT_CONFIG.reply_critic_system_prompt == REPLY_CRITIC_SYSTEM_PROMPT
+    assert PROMPT_CONFIG.confidence_threshold == DEFAULT_CONFIDENCE_THRESHOLD
+    assert settings.confidence_threshold == PROMPT_CONFIG.confidence_threshold, \
+        "default Settings must inherit the versioned threshold"
+    fingerprint = PROMPT_CONFIG.fingerprint()
+    assert re.fullmatch(r"[0-9a-f]{12}", fingerprint), fingerprint
+    assert fingerprint == PROMPT_CONFIG.fingerprint(), "fingerprint must be deterministic"
+    assert replace(PROMPT_CONFIG, confidence_threshold=0.71).fingerprint() != fingerprint, \
+        "fingerprint must change when the surface's content changes"
+    assert replace(PROMPT_CONFIG, version="9.9.9").fingerprint() != fingerprint, \
+        "fingerprint covers the version string too"
+    assert summary["prompt_config"] == PROMPT_CONFIG.summary(), summary
+    assert PROMPT_CONFIG.classification_system_prompt not in json.dumps(summary), \
+        "summaries carry version + fingerprint, never prompt text"
+
+    # per-class confidence floors (config 1.2.0): the documented defaults —
+    # safety-relevant classes demand more confidence, everything else falls
+    # back to the global 0.70. These asserts PIN the shipped values; changing
+    # them means bumping PROMPT_CONFIG.version and re-passing the eval gate.
+    assert set(PROMPT_CONFIG.class_confidence_thresholds) == \
+        {RequestType.BIOHAZARD_CLEANUP.value, RequestType.FIRE_SMOKE_DAMAGE.value}, \
+        PROMPT_CONFIG.class_confidence_thresholds
+    assert all(DEFAULT_CONFIDENCE_THRESHOLD < floor <= 1.0
+               for floor in PROMPT_CONFIG.class_confidence_thresholds.values()), \
+        "class entries are floors — they must sit above the global default"
+    assert effective_confidence_threshold(RequestType.BIOHAZARD_CLEANUP, 0.70) == \
+        (0.85, "class:biohazard_cleanup")
+    assert effective_confidence_threshold(RequestType.FIRE_SMOKE_DAMAGE, 0.70) == \
+        (0.85, "class:fire_smoke_damage")
+    assert effective_confidence_threshold(RequestType.WATER_DAMAGE, 0.70) == (0.70, "global")
+    assert effective_confidence_threshold(RequestType.UNKNOWN, 0.70) == (0.70, "global")
+    # a globally-raised threshold is never undercut by a class entry
+    assert effective_confidence_threshold(RequestType.BIOHAZARD_CLEANUP, 0.95) == (0.95, "global")
+    assert replace(PROMPT_CONFIG, class_confidence_thresholds={}).fingerprint() != fingerprint, \
+        "fingerprint covers the per-class floors"
+
     # normalization
     assert normalize_text("  water \n\n in   basement ") == "water in basement"
 
@@ -1317,6 +1493,8 @@ def selftest() -> int:
     classified_step = next(s for s in analysis.audit if s["step"] == "classified")
     assert classified_step["model_used"] == settings.primary_model, classified_step
     assert classified_step["classifier"] == "llm", classified_step
+    assert classified_step["prompt_config_version"] == PROMPT_CONFIG.version, classified_step
+    assert classified_step["prompt_config_fingerprint"] == PROMPT_CONFIG.fingerprint(), classified_step
     hazard_step = next(s for s in analysis.audit if s["step"] == "hazard_screen")
     assert hazard_step["triggered"] is False and hazard_step["matched_terms"] == [], hazard_step
     assert analysis.to_dict()["status"] == "analyzed"
@@ -1340,6 +1518,9 @@ def selftest() -> int:
     assert hazard_step["triggered"] is True and hazard_step["matched_terms"] == ["nuclear"], hazard_step
     classified_step = next(s for s in analysis.audit if s["step"] == "classified")
     assert classified_step["classifier"] == "hazard_term_screen", classified_step
+    assert classified_step["prompt_config_version"] == PROMPT_CONFIG.version, \
+        "every classified step carries the config version — deterministic paths too"
+    assert classified_step["prompt_config_fingerprint"] == PROMPT_CONFIG.fingerprint(), classified_step
     finalized_step = next(s for s in analysis.audit if s["step"] == "finalized")
     assert finalized_step["escalate_to_human"] is True, finalized_step
     assert analysis.customer_reply is None, "hazard path must make zero LLM calls, so no draft"
@@ -1657,6 +1838,100 @@ def selftest() -> int:
 
     json.dumps(analysis.to_dict())  # output must stay JSON-serializable
 
+    # --- Per-class confidence floors (config 1.2.0): reads that route near ---
+    # --- safety-relevant classes must clear a higher bar than the global   ---
+
+    # a fire read at 0.78 clears the 0.70 global but NOT the 0.85 fire floor:
+    # it must take the Opus reread (resolved here at 0.97)
+    calls = []
+
+    def fire_borderline_resolved(**kwargs):
+        calls.append(kwargs["model"])
+        if kwargs["model"] == settings.escalation_model:
+            return _json_response("fire_smoke_damage", 0.97, "Escalated read: clear fire damage.")
+        return _json_response("fire_smoke_damage", 0.78, "Borderline fire read.")
+
+    agent_fire_floor = IntakeAgent(settings, client=_FakeClient(_reply_aware(fire_borderline_resolved)))
+    analysis = agent_fire_floor.handle("Something in the garage smells scorched and there "
+                                       "are dark marks up the drywall behind the freezer.")
+    assert analysis.request_type is RequestType.FIRE_SMOKE_DAMAGE
+    assert analysis.confidence == 0.97 and analysis.escalate_to_human is False
+    assert calls == [settings.primary_model, settings.escalation_model], calls
+    finalized_step = next(s for s in analysis.audit if s["step"] == "finalized")
+    assert finalized_step["action"] == "escalated_resolved", finalized_step
+    assert finalized_step["confidence_threshold"] == 0.85, finalized_step
+    assert finalized_step["threshold_source"] == "class:fire_smoke_damage", finalized_step
+
+    # the same 0.78 on a cheap-to-misroute class passes at the global bar with
+    # no escalation call — the contrast that defines the per-class floor
+    calls = []
+
+    def water_borderline(**kwargs):
+        calls.append(kwargs["model"])
+        return _json_response("water_damage", 0.78, "Borderline water read.")
+
+    agent_water_borderline = IntakeAgent(settings, client=_FakeClient(_reply_aware(water_borderline)))
+    analysis = agent_water_borderline.handle(SAMPLE_REQUEST)
+    assert analysis.confidence == 0.78 and analysis.escalate_to_human is False
+    assert calls == [settings.primary_model], calls
+    finalized_step = next(s for s in analysis.audit if s["step"] == "finalized")
+    assert finalized_step["action"] == "passed", finalized_step
+    assert finalized_step["confidence_threshold"] == DEFAULT_CONFIDENCE_THRESHOLD, finalized_step
+    assert finalized_step["threshold_source"] == "global", finalized_step
+
+    # a model-read biohazard call (no hazard phrasing, so the deterministic
+    # screen stays out of it) stuck below its floor after the reread routes
+    # to a human — and the trail says which bar it failed
+    def biohazard_stuck(**kwargs):
+        if kwargs["model"] == settings.escalation_model:
+            return _json_response("biohazard_cleanup", 0.80, "Still unsure what the substance is.")
+        return _json_response("biohazard_cleanup", 0.75, "Possibly a contamination issue.")
+
+    agent_bio_stuck = IntakeAgent(settings, client=_FakeClient(_reply_aware(biohazard_stuck)))
+    analysis = agent_bio_stuck.handle("A strange-smelling liquid keeps seeping into our "
+                                      "crawlspace from the property next door.")
+    assert analysis.request_type is RequestType.BIOHAZARD_CLEANUP
+    assert analysis.confidence == 0.80 and analysis.escalate_to_human is True
+    finalized_step = next(s for s in analysis.audit if s["step"] == "finalized")
+    assert finalized_step["action"] == "escalated_to_human", finalized_step
+    assert finalized_step["confidence_threshold"] == 0.85, finalized_step
+    assert finalized_step["threshold_source"] == "class:biohazard_cleanup", finalized_step
+
+    # the reread is judged against the bar for the class IT reports: a shaky
+    # biohazard read that rereads as water damage passes at the global bar
+    def bio_low_then_water(**kwargs):
+        if kwargs["model"] == settings.escalation_model:
+            return _json_response("water_damage", 0.75, "Groundwater seepage, not a biohazard.")
+        return _json_response("biohazard_cleanup", 0.75, "Possibly a contamination issue.")
+
+    agent_cross_class = IntakeAgent(settings, client=_FakeClient(_reply_aware(bio_low_then_water)))
+    analysis = agent_cross_class.handle(SAMPLE_REQUEST)
+    assert analysis.request_type is RequestType.WATER_DAMAGE
+    assert analysis.confidence == 0.75 and analysis.escalate_to_human is False
+    finalized_step = next(s for s in analysis.audit if s["step"] == "finalized")
+    assert finalized_step["action"] == "escalated_resolved", finalized_step
+    assert finalized_step["confidence_threshold"] == DEFAULT_CONFIDENCE_THRESHOLD, finalized_step
+    assert finalized_step["threshold_source"] == "global", finalized_step
+
+    # an env-raised global becomes the bar everywhere — class floors tighten,
+    # they never loosen
+    settings_tight = Settings.from_env({"ANTHROPIC_API_KEY": "test-key",
+                                        "INTAKE_CONFIDENCE_THRESHOLD": "0.9"})
+
+    def fire_above_floor_below_global(**kwargs):
+        if kwargs["model"] == settings.escalation_model:
+            return _json_response("fire_smoke_damage", 0.95, "Escalated read: fire damage.")
+        return _json_response("fire_smoke_damage", 0.87, "Above the class floor, below the raised global.")
+
+    agent_tight = IntakeAgent(settings_tight,
+                              client=_FakeClient(_reply_aware(fire_above_floor_below_global)))
+    analysis = agent_tight.handle(SAMPLE_REQUEST)
+    assert analysis.confidence == 0.95 and analysis.escalate_to_human is False
+    finalized_step = next(s for s in analysis.audit if s["step"] == "finalized")
+    assert finalized_step["action"] == "escalated_resolved", finalized_step
+    assert finalized_step["confidence_threshold"] == 0.9, finalized_step
+    assert finalized_step["threshold_source"] == "global", finalized_step
+
     # --- Retry with backoff on transient provider errors (sleep injected) ---
 
     import httpx  # anthropic's own HTTP dependency; used only to build SDK errors
@@ -1782,8 +2057,8 @@ def selftest() -> int:
             server.server_close()
 
     print("selftest: all checks passed (deterministic layer, hazard + life-safety "
-          "screens, LLM classification, retry/backoff, confidence escalation, "
-          "web handlers)")
+          "screens, versioned prompt config, LLM classification, retry/backoff, "
+          "per-class confidence escalation, web handlers)")
     return 0
 
 

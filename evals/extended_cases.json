@@ -226,6 +226,34 @@
       },
       "known_failing": false,
       "diagnosis": null
+    },
+    {
+      "id": "threshold-borderline-smoke-odor",
+      "category": "threshold",
+      "why": "Per-class floor seam (config 1.2.0): faint fire-adjacent phrasing with no active emergency invites a mid-confidence fire_smoke_damage read; a read below the 0.85 fire floor must reread/escalate instead of passing at the 0.70 global. The suite-wide invariant (final confidence below its recorded bar implies escalated) does the pinning; deliberately avoids active-fire phrasing so the deterministic life-safety screen stays out of it.",
+      "text": "There's a faint smoky smell in our upstairs hallway most evenings that fades by morning. We can't find any source, nothing looks damaged anywhere, and the smoke detectors have never gone off. Could this be something inside the walls?",
+      "expect": {
+        "outcome": "analyzed",
+        "types": ["fire_smoke_damage", "general_inquiry", "unknown"],
+        "life_safety": false,
+        "pass_if_escalated": true
+      },
+      "known_failing": false,
+      "diagnosis": null
+    },
+    {
+      "id": "threshold-borderline-unknown-substance",
+      "category": "threshold",
+      "why": "Per-class floor seam (config 1.2.0), biohazard side: an unidentified strong-smelling substance — phrased without any deterministic hazard term — invites a tentative model-read biohazard_cleanup call; below the 0.85 biohazard floor it must reread/escalate rather than pass at the global bar. Same suite-wide invariant pins it.",
+      "text": "An old container of what might be paint stripper or some kind of solvent tipped over in the crawlspace of a rental property we manage. The smell is very strong and we're not sure what it actually is or how long it's been leaking down there.",
+      "expect": {
+        "outcome": "analyzed",
+        "types": ["biohazard_cleanup", "general_inquiry", "unknown"],
+        "life_safety": false,
+        "pass_if_escalated": true
+      },
+      "known_failing": false,
+      "diagnosis": null
     }
   ]
 }
