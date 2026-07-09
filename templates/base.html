@@ -106,6 +106,17 @@
   .step-head h3 { margin: 0; font-size: .95rem; }
   .step-head .at { margin-left: auto; color: #8a939c; font-size: .8rem;
                    font-variant-numeric: tabular-nums; }
+  /* audit-step field ledger */
+  .step-fields { margin-top: .55rem; font-size: .875rem;
+                 grid-template-columns: minmax(7rem, max-content) 1fr; }
+  .step-fields dt { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                    font-size: .78rem; }
+  .pre-line { white-space: pre-line; }
+  details.field-json summary { cursor: pointer; color: #5b6570; font-size: .8rem;
+                               user-select: none; }
+  details.field-json summary:hover { color: #1e2226; }
+  details.field-json[open] summary { margin-bottom: .2rem; }
+  details.field-json pre { margin: 0; }
   footer { max-width: 960px; margin: 2rem auto 2.5rem; padding: 0 1rem;
            color: #8a939c; font-size: .8rem; }
   /* escalation queue */

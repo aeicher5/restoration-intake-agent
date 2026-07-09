@@ -81,7 +81,29 @@ worked the request, the <code>escalation_*</code> workflow events continue the s
     {% endif %}
     <span class="at">{{ step.at | ts }}</span>
   </div>
-  <pre>{{ step.recorded | pretty }}</pre>
+  {% if step.fields %}
+  <dl class="step-fields">
+    {% for f in step.fields %}
+    <dt>{{ f.key }}</dt>
+    {% if f.kind == 'json' %}
+    <dd>
+      <details class="field-json"{% if f.open %} open{% endif %}>
+        <summary>{{ f.summary }}</summary>
+        <pre>{{ f.value }}</pre>
+      </details>
+    </dd>
+    {% elif f.kind == 'multiline' %}
+    <dd class="pre-line">{{ f.value }}</dd>
+    {% elif f.kind == 'code' %}
+    <dd><code>{{ f.value }}</code></dd>
+    {% else %}
+    <dd>{{ f.value }}</dd>
+    {% endif %}
+    {% endfor %}
+  </dl>
+  {% else %}
+  <p class="muted" style="margin:.45rem 0 0"><small>nothing recorded beyond the step itself</small></p>
+  {% endif %}
 </div>
 {% endfor %}
 {% endif %}

@@ -232,6 +232,37 @@ def step_safety_flag(name: str, recorded: Mapping[str, Any]) -> "str | None":
     return "tripped" if tripped else "clear"
 
 
+# A nested structure whose pretty JSON fits in this many characters starts
+# expanded in the detail view; anything bigger starts collapsed behind its
+# summary line. Purely presentational.
+FIELD_OPEN_JSON_LIMIT = 320
+
+
+def classify_field(key: str, value: Any) -> dict[str, Any]:
+    """Render hint for one recorded audit-step field — decided by the value's
+    shape, never its name, so steps future pipeline stages add render with no
+    changes here (the generic-rendering contract).
+
+    Strings show verbatim (multiline ones keep their line breaks); numbers,
+    booleans and null show JSON-exact; nested dicts/lists show as pretty JSON
+    behind a <details> that starts open only when small.
+    """
+    if isinstance(value, str):
+        return {"key": key, "kind": "multiline" if "\n" in value else "text",
+                "value": value}
+    if isinstance(value, (dict, list)):
+        pretty = _pretty_json(value)
+        count = len(value)
+        unit = ("key" if isinstance(value, dict) else "item") + ("" if count == 1 else "s")
+        summary = f"{count} {unit}"
+        if isinstance(value, dict) and value:
+            preview = ", ".join(list(value)[:3]) + (", …" if count > 3 else "")
+            summary += f" — {preview}"
+        return {"key": key, "kind": "json", "value": pretty,
+                "open": len(pretty) <= FIELD_OPEN_JSON_LIMIT, "summary": summary}
+    return {"key": key, "kind": "code", "value": json.dumps(value)}
+
+
 def iter_usage(node: Any) -> "list[tuple[str | None, int, int]]":
     """Collect (model, input_tokens, output_tokens) for every usage blob
     anywhere in a record's audit trail.
@@ -750,7 +781,7 @@ def admin_detail(request: Request, request_id: str) -> Response:
         steps.append({
             "name": name,
             "at": step.get("at", ""),
-            "recorded": recorded,
+            "fields": [classify_field(k, v) for k, v in recorded.items()],
             "safety": step_safety_flag(name, recorded),
         })
     # The trail no longer ends where the human begins: escalation-workflow
@@ -762,7 +793,7 @@ def admin_detail(request: Request, request_id: str) -> Response:
         steps.append({
             "name": name,
             "at": event.get("at", ""),
-            "recorded": recorded,
+            "fields": [classify_field(k, v) for k, v in recorded.items()],
             "safety": step_safety_flag(name, recorded),
         })
     return templates.TemplateResponse(
