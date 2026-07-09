@@ -9,16 +9,15 @@
   </nav>
 {% endblock %}
 {% block content %}
-<p class="notice warn emergency">If anyone is in danger right now — a fire still burning,
-a gas smell, structural collapse — <strong>call 911 first.</strong>
-Then send this, and we'll take the property from there.</p>
+<p class="notice warn emergency">If anyone's in danger right now, <strong>call 911
+first.</strong> The property can wait — we'll take it from there once everyone's safe.</p>
 
 {% if result %}
 {% set type_label = 'pending review' if result.request_type == 'unknown'
                     else result.request_type.replace('_', ' ') %}
 <h1>We're on it</h1>
-<p class="sub">Your request is in our system, and a coordinator sees it the moment it's
-needed. Keep the reference number — it identifies this request from here on.</p>
+<p class="sub">Your request is in. Hang on to the reference number — it's how we'll both
+find this request later.</p>
 <div class="card result-card" style="margin-top:0">
   <p class="ref-line" style="margin-top:0">Your reference:
   <code class="ref">{{ result.request_id }}</code></p>
@@ -29,7 +28,7 @@ needed. Keep the reference number — it identifies this request from here on.</
     <dd>
       {% if result.escalate_to_human %}
       <span class="badge human">specialist review</span>
-      A coordinator will review this personally and follow up with you directly.
+      A coordinator is going to look at this one personally and follow up with you.
       {% else %}
       <span class="badge auto">queued for dispatch</span>
       Routed to our {{ type_label }} team.
@@ -48,19 +47,20 @@ needed. Keep the reference number — it identifies this request from here on.</
 
 {% else %}
 <h1>Tell us what happened</h1>
-<p class="sub">Water, fire, smoke, mold, storm damage — describe it in your own words.
-Your message is read the moment it arrives, day or night, and routed to the right team.</p>
+<p class="sub">Flooding, smoke damage, mold, whatever you're dealing with — tell us in
+your own words. We read every message as soon as it comes in, any hour, and get it to
+the right crew.</p>
 
 <form method="post" action="/">
   <label class="intake-label" for="intake-text">Describe the situation</label>
   <textarea id="intake-text" name="text" required minlength="10" maxlength="8000"
     placeholder="e.g. Our basement flooded overnight after the storm — standing water everywhere, and I'm worried about mold. We're in Cedar Park."
     >{{ text }}</textarea>
-  <p class="hint">Fastest if you include what happened, where you are, and how long it's
-  been going on. You'll get a reference number right away.</p>
+  <p class="hint">Include where you are and how long it's been happening — it saves the
+  crew a callback. You'll get a reference number as soon as this goes through.</p>
   <button type="submit">Send request</button>
-  <p class="hint">Prefer to talk? Call <a href="tel:+15125550148">(512) 555-0148</a> —
-  a person answers any hour.</p>
+  <p class="hint">Rather talk to a person? Call <a href="tel:+15125550148">(512) 555-0148</a>.
+  Someone picks up, even at 3am.</p>
 </form>
 
 {% if error %}
@@ -71,10 +71,12 @@ Your message is read the moment it arrives, day or night, and routed to the righ
 {% endif %}
 
 <ol class="next-steps">
-  <li><b>Read immediately.</b> Our intake system assesses your message the moment it lands.</li>
-  <li><b>Routed right.</b> It goes straight to the matching crew — anything urgent or
-  unclear goes to a human coordinator.</li>
-  <li><b>Tracked.</b> Your reference number follows the request from first read to dispatch.</li>
+  <li>Your message gets read the second it arrives. Software does the first pass, so
+  nothing sits in an inbox overnight.</li>
+  <li>It goes to the right crew. Anything urgent or unclear gets a human coordinator
+  instead.</li>
+  <li>Your reference number tracks the whole thing, from first read to the crew heading
+  out.</li>
 </ol>
 
 <script>
