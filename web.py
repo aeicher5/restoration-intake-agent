@@ -40,7 +40,7 @@ import re
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -366,6 +366,29 @@ def _format_timestamp(value: Any) -> str:
         return str(value)
 
 
+def _relative_age(value: Any) -> str:
+    """ISO timestamp -> compact age: 'just now', '4m ago', '3h ago', '2d ago'.
+
+    Server-rendered, so it ages until the next page load — render it next to
+    the absolute stamp (e.g. in a title attribute), never instead of it.
+    """
+    try:
+        then = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return str(value)
+    now = datetime.now(then.tzinfo or timezone.utc)
+    if then.tzinfo is None:  # pipeline stamps are UTC; treat naive ones as such
+        then = then.replace(tzinfo=timezone.utc)
+    seconds = max(0.0, (now - then).total_seconds())
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{int(seconds / 60)}m ago"
+    if seconds < 48 * 3600:
+        return f"{int(seconds / 3600)}h ago"
+    return f"{int(seconds / 86400)}d ago"
+
+
 def _pretty_json(value: Any) -> str:
     return json.dumps(value, indent=2, ensure_ascii=False)
 
@@ -384,6 +407,7 @@ def _format_usd(value: Any) -> str:
 
 
 templates.env.filters["ts"] = _format_timestamp
+templates.env.filters["age"] = _relative_age
 templates.env.filters["pretty"] = _pretty_json
 templates.env.filters["usd"] = _format_usd
 
