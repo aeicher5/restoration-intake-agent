@@ -16,7 +16,7 @@ Refreshes itself every 30 seconds unless you're mid-action.</p>
 <div class="stats-strip">
   <div class="stat">
     <span class="stat-label">Life-safety</span>
-    <span class="stat-value"{% if counts.life_safety %} style="color:#b91c1c"{% endif %}>{{ counts.life_safety }}</span>
+    <span class="stat-value{% if counts.life_safety %} alert{% endif %}">{{ counts.life_safety }}</span>
     <span class="stat-sub">unresolved emergencies</span>
   </div>
   <div class="stat">

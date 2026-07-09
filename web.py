@@ -457,13 +457,14 @@ templates.env.filters["confpct"] = _confidence_pct
 _ADMIN_DENIED_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Admin — token required</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' \
-viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231c6e45'/%3E%3Cpath \
-d='M16 6C16 6 9 14.5 9 19a7 7 0 0 0 14 0C23 14.5 16 6 16 6Z' fill='%23fff'/%3E%3C/svg%3E">
-<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-background:#f4f4f2;color:#1e2226;display:grid;place-items:center;min-height:100vh;margin:0}
-.card{background:#fff;border:1px solid #dde1e5;border-radius:10px;padding:1.5rem 2rem;
-max-width:26rem}h1{font-size:1.05rem;margin:0 0 .4rem}p{margin:.3rem 0;color:#5b6570;
-font-size:.9rem}code{font-family:ui-monospace,Menlo,monospace;background:#f6f8fa;
+viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2315171E'/%3E%3Cpath \
+d='M16 6C16 6 9 14.5 9 19a7 7 0 0 0 14 0C23 14.5 16 6 16 6Z' fill='%23E4610A'/%3E%3C/svg%3E">
+<style>body{font-family:"IBM Plex Sans",-apple-system,"Segoe UI",sans-serif;
+background:#FAF9F6;color:#23262E;display:grid;place-items:center;min-height:100vh;margin:0}
+.card{background:#fff;border:1px solid #E7E4DE;border-radius:8px;padding:1.5rem 2rem;
+max-width:26rem}h1{font-size:1.05rem;margin:0 0 .4rem;color:#15171E}
+p{margin:.3rem 0;color:#5B6472;font-size:.9rem}
+code{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;background:#F1EFEA;
 padding:.1rem .3rem;border-radius:4px}</style></head>
 <body><div class="card"><h1>Admin access requires a token</h1>
 <p>This deployment gates the admin views. Open
