@@ -132,6 +132,15 @@ def normalize_label(value: Any) -> "str | None":
 
 def find_corrected_type(event: dict[str, Any]) -> "tuple[str | None, str | None]":
     """(corrected_type, key_it_came_from) — searching nested objects too."""
+    # The escalation lane's shipped shape (declared in its handoff): an
+    # explicit resolution="corrected" discriminator, the human's answer in
+    # request_type, and the model's read preserved in original_type. Only
+    # this exact triple lifts the request_type ban below — the discriminator
+    # plus original_type make the field unambiguous.
+    if event.get("resolution") == "corrected" and "original_type" in event:
+        label = normalize_label(event.get("request_type"))
+        if label is not None and label != normalize_label(event.get("original_type")):
+            return label, "request_type (resolution=corrected)"
     for node in _walk(event):
         for key, value in node.items():
             key_lc = str(key).lower()
@@ -201,7 +210,7 @@ def build_candidate(event: dict[str, Any], record: dict[str, Any],
     cand_id, request_id = candidate_id(event, record)
     text = find_text(event, record, text_index, request_id)
 
-    original_read = normalize_label(event.get("request_type")) or \
+    original_read = normalize_label(event.get("original_type") or event.get("request_type")) or \
         next((normalize_label(node.get("request_type")) for node in _walk(record)
               if normalize_label(node.get("request_type"))), None)
 
@@ -326,6 +335,17 @@ def selftest() -> int:
         # 7: denormalized label spelling normalizes
         {"event": RESOLVED_MARKER, "request_id": "req_fff", "correction": "Mold Remediation",
          "raw_text": "Musty smell in the crawlspace that never goes away."},
+        # 8: the escalation lane's shipped shape — resolution="corrected"
+        #    discriminator + original_type; request_type is the HUMAN's answer
+        #    here and must count (the one sanctioned lift of the ban)
+        {"kind": "escalation_event", "event": RESOLVED_MARKER, "request_id": "req_hhh",
+         "at": "2026-07-08T20:10:00Z", "resolution": "corrected",
+         "request_type": "general_inquiry", "original_type": "mold_remediation",
+         "text": "Something feels wrong with our house lately."},
+        # 9: same shape but resolution="confirmed" -> not a correction, skipped
+        {"kind": "escalation_event", "event": RESOLVED_MARKER, "request_id": "req_iii",
+         "at": "2026-07-08T20:11:00Z", "resolution": "confirmed",
+         "request_type": "fire_smoke_damage", "original_type": "fire_smoke_damage"},
     ]
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -339,7 +359,8 @@ def selftest() -> int:
         queue = json.loads(out_path.read_text())
         by_id = {c["id"]: c for c in queue["candidates"]}
         assert set(by_id) == {"correction-req_aaa", "correction-req_bbb",
-                              "correction-req_eee", "correction-req_fff"}, sorted(by_id)
+                              "correction-req_eee", "correction-req_fff",
+                              "correction-req_hhh"}, sorted(by_id)
 
         aaa = by_id["correction-req_aaa"]
         assert aaa["corrected_type"] == "fire_smoke_damage"
@@ -358,6 +379,12 @@ def selftest() -> int:
         assert by_id["correction-req_eee"]["status"] == "incomplete_missing_text"
         assert by_id["correction-req_eee"]["text"] is None
         assert by_id["correction-req_fff"]["corrected_type"] == "mold_remediation"
+        hhh = by_id["correction-req_hhh"]
+        assert hhh["corrected_type"] == "general_inquiry", \
+            "escalation-lane resolved shape must count as a correction"
+        assert hhh["source"]["original_model_read"] == "mold_remediation", \
+            "original_type is the model's read on escalation-lane events"
+        assert hhh["source"]["corrected_type_key"] == "request_type (resolution=corrected)"
         assert "never auto-merged" in queue["_note"]
         for candidate in queue["candidates"]:
             assert candidate["proposed_case"]["category"] == "correction"
@@ -369,7 +396,7 @@ def selftest() -> int:
         out_path.write_text(json.dumps(queue))
         assert ingest(log_path, out_path) == 0
         again = {c["id"]: c for c in json.loads(out_path.read_text())["candidates"]}
-        assert len(again) == 4, "re-run must not duplicate candidates"
+        assert len(again) == 5, "re-run must not duplicate candidates"
         assert again["correction-req_aaa"]["status"] == "merged", \
             "re-run must never overwrite a human-touched candidate"
 
@@ -377,8 +404,8 @@ def selftest() -> int:
         assert ingest(Path(tmp) / "no_such.jsonl", out_path) == 0
 
     print("ingest selftest: all checks passed (event discovery, nested corrections, "
-          "label normalization, request_type never counts, incomplete queueing, "
-          "idempotent re-runs, junk-line tolerance)")
+          "escalation-lane resolved shape, label normalization, request_type alone "
+          "never counts, incomplete queueing, idempotent re-runs, junk-line tolerance)")
     return 0
 
 
