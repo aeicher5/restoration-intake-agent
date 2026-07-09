@@ -4,19 +4,19 @@
 {% block chrome %}
   <nav>
     <span class="brand">Alpine Restoration</span>
-    <span class="tagline">Water · Fire · Mold — Austin, TX</span>
+    <span class="tagline">Water · Fire · Mold · Austin, TX</span>
     <a class="phone" href="tel:+15125550148"><small>24/7</small>(512) 555-0148</a>
   </nav>
 {% endblock %}
 {% block content %}
 <p class="notice warn emergency">If anyone's in danger right now, <strong>call 911
-first.</strong> The property can wait — we'll take it from there once everyone's safe.</p>
+first.</strong> The property can wait. We'll take it from there once everyone's safe.</p>
 
 {% if result %}
 {% set type_label = 'pending review' if result.request_type == 'unknown'
                     else result.request_type.replace('_', ' ') %}
 <h1>We're on it</h1>
-<p class="sub">Your request is in. Hang on to the reference number — it's how we'll both
+<p class="sub">Your request is in. Hang on to the reference number. It's how we'll both
 find this request later.</p>
 <div class="card result-card" style="margin-top:0">
   <p class="ref-line" style="margin-top:0">Your reference:
@@ -47,16 +47,16 @@ find this request later.</p>
 
 {% else %}
 <h1>Tell us what happened</h1>
-<p class="sub">Flooding, smoke damage, mold, whatever you're dealing with — tell us in
-your own words. We read every message as soon as it comes in, any hour, and get it to
-the right crew.</p>
+<p class="sub">Flooding, smoke damage, mold, whatever it is. Write it the way you'd
+tell a neighbor. We read every message as soon as it comes in, any hour, and get it
+to the right crew.</p>
 
 <form method="post" action="/">
   <label class="intake-label" for="intake-text">Describe the situation</label>
   <textarea id="intake-text" name="text" required minlength="10" maxlength="8000"
-    placeholder="e.g. Our basement flooded overnight after the storm — standing water everywhere, and I'm worried about mold. We're in Cedar Park."
+    placeholder="e.g. Our basement flooded overnight after the storm, there's standing water everywhere, and I'm worried about mold. We're in Cedar Park."
     >{{ text }}</textarea>
-  <p class="hint">Include where you are and how long it's been happening — it saves the
+  <p class="hint">Include where you are and how long it's been happening. It saves the
   crew a callback. You'll get a reference number as soon as this goes through.</p>
   <button type="submit">Send request</button>
   <p class="hint">Rather talk to a person? Call <a href="tel:+15125550148">(512) 555-0148</a>.
