@@ -80,7 +80,9 @@ python3 evals/ingest_corrections.py --selftest  # offline check on a synthetic l
 
 It scans the log for `escalation_resolved` events (the escalation workstream owns that event
 shape, so consumption is generic — top-level records or nested audit steps, several
-correction-key spellings, nested `resolution` objects) and every resolved event carrying a
+correction-key spellings, nested `resolution` objects; the escalation lane's shipped shape —
+`resolution: "corrected"` + `original_type`, with the human's answer in `request_type` — is
+recognized natively) and every resolved event carrying a
 corrected type becomes a candidate in **`evals/corrections.json`**: the corrected label, the
 original request text, provenance (who resolved it, when, what the model originally read),
 and a ready-to-edit `proposed_case` in this suite's schema.

@@ -39,10 +39,10 @@ flowchart LR
     H --> LS{"life-safety screen<br/>(deterministic)"}
     LS -- "match: flag +<br/>force human review" --> C
     LS --> C["classify: Haiku<br/>(Sonnet fallback,<br/>retry w/ backoff)"]
-    C --> G{"confidence<br/>≥ 0.70?"}
+    C --> G{"confidence ≥ bar?<br/>(0.70 global; 0.85 floor<br/>biohazard & fire)"}
     G -- yes --> RE
     G -- no --> O["reread: Opus"]
-    O -- "≥ 0.70" --> RE
+    O -- "clears its bar" --> RE
     O -- "still low / failed" --> HU["human review"]
     HU --> RE["reply: draft → critic<br/>→ ≤1 revision<br/>(fallback: dispatcher note)"]
     HB --> T[("audit trail<br/>(every step + why)")]
@@ -66,7 +66,7 @@ echo "ANTHROPIC_API_KEY=<your key>" > .env    # .env is gitignored; never commit
 
 python3 agent.py "There is standing water in our basement"   # one request, live
 python3 agent.py --evals                       # built-in labeled suite, live (12 cases)
-python3 evals/run_extended.py                  # extended suite, live (15 cases)
+python3 evals/run_extended.py                  # extended suite, live (19 cases)
 python3 evals/run_extended.py --check          # extended suite schema/scorer check, offline
 ```
 
@@ -75,15 +75,17 @@ python3 evals/run_extended.py --check          # extended suite schema/scorer ch
 ```bash
 pip install -r requirements.txt
 python3 demo.py           # seed the admin view: 5 archetypal requests through the live pipeline
-python3 web.py            # http://localhost:8080 — intake at /, audit trail at /admin
+python3 web.py            # http://localhost:8080 — intake at /, audit trail at /admin,
+                          # dispatcher work queue at /admin/queue
 ```
 
 Ops knobs (all optional; defaults are the localhost posture):
 
 - `PORT` — platform-style port override (`INTAKE_WEB_PORT` still honored).
-- `ADMIN_TOKEN` — set it and `/admin` requires auth: visit
-  `/admin?token=<value>` once, then an HttpOnly cookie takes over. The token
-  is redacted from access logs. Unset = open, for local use only.
+- `ADMIN_TOKEN` — set it and the admin views (including the dispatcher queue
+  at `/admin/queue` and its actions) require auth: visit `/admin?token=<value>`
+  once, then an HttpOnly cookie takes over. The token is redacted from access
+  logs. Unset = open, for local use only.
 - `INTAKE_RATE_BURST` / `INTAKE_RATE_PER_MINUTE` — per-IP rate limit on
   `POST /` (defaults: burst 5, 6/min; excess gets 429 + `Retry-After`).
 
@@ -103,10 +105,11 @@ docker run --rm restoration-intake             # runs the offline selftest
 |---|---|
 | `agent.py` | The pipeline: validation → hazard screen → LLM classification (Haiku, Sonnet fallback, Opus reread) → escalation → audit trail. Selftest, evals, and a stdlib dev server included |
 | `web.py`, `templates/` | FastAPI web layer + JSONL audit persistence |
+| `escalations.py` | Escalation workflow: open → acknowledged → resolved, folded from audit events; powers `/admin/queue` |
 | `demo.py` | Seed the admin view: 5 archetypal requests through the live pipeline |
-| `evals/` | Extended eval suite, runner, and live results ([evals/README.md](evals/README.md)) |
+| `evals/` | Extended eval suite, runner, correction ingest, and live results ([evals/README.md](evals/README.md)) |
 | `Dockerfile` | python-slim image, selftest as default CMD |
-| `.github/workflows/ci.yml` | Offline CI on every push (selftest, eval check, web import) — zero secrets |
+| `.github/workflows/` | `ci.yml`: offline CI on every push — zero secrets. `promotion-gate.yml`: prompt/eval changes re-run the live suite before judgment-affecting changes land |
 | `railway.toml`, `DEPLOY.md` | Config-as-code deploy + step-by-step deploy guide |
 | `ARCHITECTURE.md` | How the system works and what changes at scale |
 | `ORCHESTRATION.md` | How parallel agents built this in an evening — timeline, cost, method |

@@ -40,10 +40,13 @@ free-text request (web form · CLI · JSON API)
       │  transient errors → retry         types. Retry w/ exponential backoff
       │  total failure → fail-safe stub   + jitter, transient errors only
       ▼
-5  confidence gate (threshold 0.70)       model-reported confidence, clamped
-      │  below → reread on Opus           by code; a low read gets one reread
-      │  still below → human review       on the escalation model; still low
-      │                                   or reread failure → human
+5  confidence gate (per-class floors)     model-reported confidence, clamped
+      │  below its bar → reread on Opus   by code. Effective bar = max(global
+      │  still below → human review       0.70, class floor): biohazard_cleanup
+      │                                   and fire_smoke_damage reads need
+      │                                   0.85 — judged against the class the
+      │                                   read reports; the finalized step
+      │                                   records the bar + its source
       ▼
 6  respond — reviewed customer reply      draft (Haiku) → critic (Haiku
       │                                   checklist: no cost promises, no
@@ -60,9 +63,10 @@ free-text request (web form · CLI · JSON API)
       │                                   reply_reviewed / customer_reply,
       │                                   finalized — every request, every
       ▼                                   decision, with the why
-8  admin surface                          /admin table + stats strip over the
-                                          trail, escalated rows flagged;
-                                          per-request step-by-step detail;
+8  admin surface + dispatcher queue       /admin table + stats strip over the
+                                          trail; /admin/queue works the open
+                                          escalations (see the workflow
+                                          section below); per-request detail;
                                           optional ADMIN_TOKEN gate
 ```
 
@@ -90,15 +94,63 @@ principle — and both cost zero API calls.
 - **Auditability is a requirement, not a feature.** Every step records what
   happened and why; the admin view is just a renderer over that trail.
 
+## The escalation workflow: state folded from events
+
+"Escalate to a human" stopped being a terminal flag. Escalated requests carry
+a workflow state — **open → acknowledged → resolved** — and the state is not
+stored anywhere: it is **derived by folding workflow events over the same
+append-only store** the pipeline writes. Event lines share the file with
+request records, discriminated by `kind: "escalation_event"`; `AuditStore`'s
+record readers filter them out, so nothing that reads requests had to change.
+
+- `escalation_opened` is appended when an escalated record is stored (with
+  machine-derived reasons: `life_safety`, `hazard_screen`, `low_confidence`,
+  …). Life-safety openings fire a pluggable notification hook
+  (`escalations.NOTIFIERS`; ships with a structured log-line channel — SMS or
+  pager callables register alongside it).
+- `/admin/queue` is the dispatcher surface: unresolved escalations,
+  life-safety pinned first, acknowledge/resolve actions on each card.
+- Resolving records the human's decision — `confirmed` or `corrected`, the
+  final type, and a note — **into the same audit trail**, so the record of a
+  request now runs from `received` through the model's reasoning to the
+  human's disposition. Escalated records with no events yet derive as
+  implicitly open: pre-workflow stores need no migration.
+
+## The promotion flywheel: eval-gated change, human-reviewed corrections
+
+Everything the pipeline's judgment depends on — the three system prompts and
+the confidence thresholds — is one versioned artifact (`agent.PROMPT_CONFIG`,
+currently `1.2.0`, with a content fingerprint). Every trail's `classified`
+step records the version + fingerprint, so any request traces to the exact
+artifact that read it; `/health` reports it.
+
+Changing the artifact is gated: `.github/workflows/promotion-gate.yml`
+triggers on prompt/eval/config paths, always runs the offline checks, and
+runs the **live extended suite** when the repository has an API-key secret
+(skipping loudly when it doesn't). Prompts don't change without the evals
+passing on the change — the regression gate the eval suite always wanted
+to be.
+
+The loop closes from production: `evals/ingest_corrections.py` harvests
+`escalation_resolved` events where a human corrected the model's read and
+turns each into a candidate eval case in `evals/corrections.json` — original
+text, corrected label, provenance, and a ready-to-edit `proposed_case`.
+**Human review is the gate by construction**: the script refuses to write
+`extended_cases.json`, re-runs never overwrite a reviewed candidate, and a
+correction only enters the suite when a person copies it in. Dispatcher
+corrections become tomorrow's regression cases; the promotion gate then
+holds every future prompt change to them.
+
 ## Components
 
 | Path | What it is |
 |---|---|
 | `agent.py` | The whole pipeline + config, offline `--selftest` (fake client), live `--evals`, stdlib dev server (`--serve`) |
-| `web.py`, `templates/` | FastAPI layer: `/` customer intake (per-IP rate limit), `/admin` audit table + stats strip (optional `ADMIN_TOKEN` gate), `/admin/{id}` detail, `/health`. Owns persistence via an append-only JSONL audit store (the pipeline itself is stateless); renders new pipeline steps/fields generically — no hardcoded step list |
-| `evals/` | 17-case extended suite + standalone runner (xfail semantics, offline `--check`) — see `evals/README.md` for live results |
+| `web.py`, `templates/` | FastAPI layer: `/` customer intake (per-IP rate limit), `/admin` audit table + stats strip, `/admin/queue` dispatcher queue, `/admin/{id}` detail, `/health` (all admin views behind the optional `ADMIN_TOKEN` gate). Owns persistence via an append-only JSONL audit store (the pipeline itself is stateless); renders new pipeline steps/fields generically — no hardcoded step list |
+| `escalations.py` | The workflow state machine: event shapes, state folding, escalation reasons, notification hook. Stdlib-only, self-testing (`python3 escalations.py`) |
+| `evals/` | 19-case extended suite + standalone runner (xfail semantics, offline `--check`) + `ingest_corrections.py` (resolved escalations → candidate cases) — see `evals/README.md` |
 | `Dockerfile` | python-slim, non-root; runs `--selftest` by default |
-| `.github/workflows/ci.yml` | Offline CI on every push: selftest, eval `--check`, web import smoke — zero secrets |
+| `.github/workflows/` | `ci.yml`: offline suite on every push (selftests incl. escalations + ingest, eval check, web import) — zero secrets. `promotion-gate.yml`: live eval suite on prompt/eval changes |
 | `railway.toml`, `runtime.txt`, `DEPLOY.md` | Config-as-code deploy (Railway; Render fallback) with env-var table and verification checklist |
 
 ## What changes at production scale
@@ -128,9 +180,10 @@ one process). The seams below are where the system grows without a rewrite:
 - **Observability** — the eval metrics (accuracy, avg confidence, escalation
   rate, latency) become production dashboards; alert on escalation-rate and
   confidence drift, which is how prompt or model regressions surface.
-- **Evals in CI** — `--selftest` on every commit (offline, free);
-  `evals/run_extended.py` on merge and on any prompt/model change. The xfail
-  mechanism lets known bugs ride in CI without masking new ones.
+- **Evals in CI** — ✅ real as of wave 3: the offline suite runs on every
+  push, and the promotion gate re-runs the live suite on any prompt/config/
+  eval change (see the promotion-flywheel section). The xfail mechanism lets
+  known bugs ride in CI without masking new ones.
 
 ### Gaps ledger
 
@@ -162,5 +215,9 @@ Still open, deliberately (from the wave-2 handoffs):
 - Pricing questions escalate to a human by design (the critic refuses cost
   promises — see `evals/README.md`); a graceful decline-pricing line in the
   responder prompt, or a real quoting flow, is the follow-up.
-- The admin *list* view has no life-safety badge yet (the detail view flags
-  it); cosmetic, one template change.
+- ~~The admin *list* view has no life-safety badge~~ — **closed 2026-07-08
+  (wave 3, escalation lane):** unresolved life-safety escalations badge on
+  the admin table and pin to the top of `/admin/queue`.
+- Escalation acknowledge/resolve actions carry no user identity yet
+  (deliberate at MVP — there are no identities until SSO lands; see
+  `ROADMAP.md` §4, which makes actions attributable).
