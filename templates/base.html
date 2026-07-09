@@ -142,6 +142,17 @@
   button.secondary { background: #fff; color: #1e2226; border: 1px solid #c6ccd2; }
   .chip.ack { background: #dbeafe; color: #1e3a8a; }
   .chip.mini { font-size: .72rem; padding: .05rem .45rem; color: #5b6570; }
+  .nav-count { display: inline-block; min-width: 1.15rem; padding: 0 .3rem;
+               text-align: center; border-radius: 999px; background: #eef1f4;
+               color: #3b4650; font-size: .72rem; font-weight: 600; line-height: 1.5;
+               font-variant-numeric: tabular-nums; }
+  .nav-count.danger { background: #f8d7d3; color: #7f1d1d; }
+  .conf-meter { display: inline-flex; align-items: center; gap: .45rem;
+                font-variant-numeric: tabular-nums; }
+  .conf-meter .track { width: 44px; height: 5px; border-radius: 999px;
+                       background: #e4e8eb; overflow: hidden; flex: none; }
+  .conf-meter .fill { display: block; height: 100%; border-radius: 999px;
+                      background: #1c6e45; }
   .badge.danger.pulse { animation: esc-pulse 1.6s ease-in-out infinite; }
   @keyframes esc-pulse { 50% { opacity: .55; } }
   .notice { margin-top: 1rem; padding: .6rem 1rem; border-radius: 8px; font-size: .9rem; }
@@ -155,7 +166,9 @@
     <span class="brand">Restoration Intake</span>
     <a href="/" {% if active == 'intake' %}class="on"{% endif %}>Customer intake</a>
     <a href="/admin" {% if active == 'admin' %}class="on"{% endif %}>Admin</a>
-    <a href="/admin/queue" {% if active == 'queue' %}class="on"{% endif %}>Queue</a>
+    <a href="/admin/queue" {% if active == 'queue' %}class="on"{% endif %}>Queue{% if nav_queue %}
+      <span class="nav-count{% if nav_queue_danger %} danger{% endif %}"
+            title="{{ nav_queue }} unresolved escalation{{ '' if nav_queue == 1 else 's' }}{% if nav_queue_danger %}, life-safety among them{% endif %}">{{ nav_queue }}</span>{% endif %}</a>
   </nav>
 </header>
 <main>

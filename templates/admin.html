@@ -106,7 +106,8 @@
       <td class="muted" style="white-space:nowrap">{{ r.received_at | ts }}</td>
       <td><a href="/admin/{{ r.request_id }}"><code>{{ r.request_id }}</code></a></td>
       <td><span class="chip">{{ r.request_type.replace('_', ' ') }}</span></td>
-      <td>{{ "%.2f"|format(r.confidence) }}</td>
+      <td class="conf"><span class="conf-meter"><span class="track"><span class="fill"
+        style="width:{{ r.confidence | confpct }}%"></span></span>{{ "%.2f"|format(r.confidence) }}</span></td>
       <td>
         {% if r.get('extras', {}).get('status') == 'rejected' %}
         <span class="badge rejected">rejected</span>

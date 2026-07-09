@@ -437,10 +437,19 @@ def _format_usd(value: Any) -> str:
     return f"${amount:.2f}"
 
 
+def _confidence_pct(value: Any) -> int:
+    """Confidence 0..1 -> integer percent clamped to [0, 100], for bar widths."""
+    try:
+        return max(0, min(100, round(float(value) * 100)))
+    except (TypeError, ValueError):
+        return 0
+
+
 templates.env.filters["ts"] = _format_timestamp
 templates.env.filters["age"] = _relative_age
 templates.env.filters["pretty"] = _pretty_json
 templates.env.filters["usd"] = _format_usd
+templates.env.filters["confpct"] = _confidence_pct
 
 
 # ------------------------------------------------------------------ admin auth
@@ -683,7 +692,11 @@ def admin_list(request: Request) -> Response:
         {"active": "admin", "records": shown, "total": len(records),
          "stats": stats, "filters": filters, "type_options": type_options,
          "routing_options": ROUTING_FILTERS,
-         "wf_states": wf_states, "queue_counts": queue_counts},
+         "wf_states": wf_states, "queue_counts": queue_counts,
+         # nav badge: only admin pages hand these to the template — the
+         # customer intake page never sees queue numbers.
+         "nav_queue": queue_counts["unresolved"],
+         "nav_queue_danger": queue_counts["life_safety"] > 0},
     )
 
 
@@ -723,7 +736,9 @@ def admin_queue(request: Request) -> Response:
         request, "queue.html",
         {"active": "queue", "entries": entries, "counts": counts,
          "resolvable_types": RESOLVABLE_TYPES,
-         "notice": QUEUE_NOTICES.get(request.query_params.get("notice", ""))},
+         "notice": QUEUE_NOTICES.get(request.query_params.get("notice", "")),
+         "nav_queue": len(entries),
+         "nav_queue_danger": counts["life_safety"] > 0},
     )
 
 
@@ -765,11 +780,14 @@ def admin_detail(request: Request, request_id: str) -> Response:
     denied = _admin_guard(request)
     if denied is not None:
         return denied
+    queue = WORKFLOW.queue_entries()
+    nav = {"nav_queue": len(queue),
+           "nav_queue_danger": any(e["wf"]["life_safety"] for e in queue)}
     record = STORE.get(request_id)
     if record is None:
         return templates.TemplateResponse(
             request, "detail.html",
-            {"active": "admin", "record": None, "request_id": request_id},
+            {"active": "admin", "record": None, "request_id": request_id, **nav},
             status_code=404,
         )
     # Key must not collide with a dict method name (e.g. "values"): Jinja's
@@ -800,7 +818,7 @@ def admin_detail(request: Request, request_id: str) -> Response:
         request, "detail.html",
         {"active": "admin", "record": record, "request_id": request_id,
          "steps": steps, "path": escalation_path(record),
-         "wf": WORKFLOW.state_of(request_id)},
+         "wf": WORKFLOW.state_of(request_id), **nav},
     )
 
 

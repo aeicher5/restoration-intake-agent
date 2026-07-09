@@ -39,7 +39,8 @@ Refreshes itself every 30 seconds unless you're mid-action.</p>
     <span class="chip {% if wf.state == 'acknowledged' %}ack{% else %}warn{% endif %}">{{ wf.state }}</span>
     <a href="/admin/{{ r.request_id }}"><code>{{ r.request_id }}</code></a>
     <span class="chip">{{ r.request_type.replace('_', ' ') }}</span>
-    <span class="muted">conf {{ "%.2f"|format(r.confidence) }}</span>
+    <span class="muted conf-meter">conf <span class="track"><span class="fill"
+      style="width:{{ r.confidence | confpct }}%"></span></span>{{ "%.2f"|format(r.confidence) }}</span>
     {# the life-safety badge already says it — no duplicate reason chip #}
     {% for reason in wf.reasons if reason != 'life_safety' %}
     <span class="chip mini">{{ reason.replace('_', ' ') }}</span>
