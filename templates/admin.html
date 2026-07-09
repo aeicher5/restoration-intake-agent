@@ -1,9 +1,10 @@
 {% extends "base.html" %}
-{% block title %}Restoration Intake — Admin{% endblock %}
+{% block title %}Dispatch — requests{% endblock %}
 {% block width %}960px{% endblock %}
 {% block content %}
-<h1>Processed requests</h1>
-<p class="sub">Read from the audit store, newest first. Click a row for the full audit trail.</p>
+<h1>Requests</h1>
+<p class="sub">Everything the pipeline has processed, newest first — read straight from the
+audit store. Click a row for the full trail.</p>
 
 {% if stats.total %}
 <div class="stats-strip">

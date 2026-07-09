@@ -1,5 +1,12 @@
 {% extends "base.html" %}
-{% block title %}Restoration Intake — Request help{% endblock %}
+{% block title %}Alpine Restoration — 24/7 water, fire & mold response · Austin, TX{% endblock %}
+{% block chrome %}
+  <nav>
+    <span class="brand">Alpine Restoration</span>
+    <span class="tagline">Water · Fire · Mold — Austin, TX</span>
+    <a class="phone" href="tel:+15125550148"><small>24/7</small>(512) 555-0148</a>
+  </nav>
+{% endblock %}
 {% block content %}
 <p class="notice warn emergency">If anyone is in danger right now — fire still burning,
 structural collapse, sewage in living space — <strong>call 911 first.</strong>
@@ -16,6 +23,8 @@ Your message is read the moment it arrives, day or night, and routed to the righ
   <p class="hint">Fastest if you include what happened, where you are, and how long it's
   been going on. You'll get a reference number right away.</p>
   <button type="submit">Send request</button>
+  <p class="hint">Prefer to talk? Call <a href="tel:+15125550148">(512) 555-0148</a> —
+  a person answers any hour.</p>
 </form>
 
 <ol class="next-steps">
@@ -63,5 +72,7 @@ Your message is read the moment it arrives, day or night, and routed to the righ
 </div>
 {% endif %}
 {% endblock %}
-{% block footer %}Every request gets a reference number the moment it arrives, and a
-documented trail that follows it from first read to crew dispatch.{% endblock %}
+{% block footer %}<span class="foot-brand">Alpine Restoration</span><span class="foot-sep">·</span>
+Austin, TX<span class="foot-sep">·</span>Licensed &amp; insured<span class="foot-sep">·</span>
+24/7 emergency response: <a href="tel:+15125550148">(512) 555-0148</a><span class="foot-sep">·</span>
+<a href="/admin">Staff sign-in</a>{% endblock %}

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}Restoration Intake{% endblock %}</title>
+<title>{% block title %}Alpine Restoration{% endblock %}</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2315171E'/%3E%3Cpath d='M16 6C16 6 9 14.5 9 19a7 7 0 0 0 14 0C23 14.5 16 6 16 6Z' fill='%23E4610A'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -48,6 +48,24 @@
           padding-bottom: .2rem; border-bottom: 2px solid transparent; }
   nav a:hover { color: #E8E7E2; }
   nav a.on { color: #FFFFFF; border-bottom-color: var(--accent); }
+  .ops-tag { font-family: var(--mono); font-size: .64rem; letter-spacing: .1em;
+             text-transform: uppercase; color: #F0A868; border: 1px solid #3A3E4A;
+             padding: .12rem .42rem; border-radius: 4px; margin-left: .6rem;
+             vertical-align: .12em; font-weight: 400; }
+  nav a.aux { color: #7A808E; font-size: .82rem; }
+  nav a.aux:hover { color: #C9CDD6; }
+  .tagline { color: #7A808E; font-size: .8rem; letter-spacing: .02em; }
+  a.phone { margin-left: auto; color: #fff; text-decoration: none;
+            font-family: var(--display); font-weight: 650; font-size: 1rem;
+            letter-spacing: .01em; border-bottom: 0; }
+  a.phone small { color: #F0A868; font-family: var(--mono); font-size: .68rem;
+                  letter-spacing: .1em; margin-right: .45rem; font-weight: 400; }
+  a.phone:hover { color: #F0A868; }
+  @media (max-width: 620px) { .tagline { display: none; } }
+  footer .foot-brand { color: var(--slate); font-weight: 600; }
+  footer a { color: var(--accent-deep); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+  footer .foot-sep { margin: 0 .5rem; color: var(--line-strong); }
 
   main { max-width: {% block width %}760px{% endblock %}; margin: 2.75rem auto 0; padding: 0 1.25rem; }
   h1 { font-family: var(--display); font-weight: 750; letter-spacing: -.02em;
@@ -268,19 +286,21 @@
 </head>
 <body>
 <header>
+{% block chrome %}
   <nav>
-    <span class="brand">Restoration Intake</span>
-    <a href="/" {% if active == 'intake' %}class="on"{% endif %}>Customer intake</a>
-    <a href="/admin" {% if active == 'admin' %}class="on"{% endif %}>Admin</a>
+    <span class="brand">Alpine Restoration<span class="ops-tag">Dispatch</span></span>
+    <a href="/admin" {% if active == 'admin' %}class="on"{% endif %}>Requests</a>
     <a href="/admin/queue" {% if active == 'queue' %}class="on"{% endif %}>Queue{% if nav_queue %}
       <span class="nav-count{% if nav_queue_danger %} danger{% endif %}"
             title="{{ nav_queue }} unresolved escalation{{ '' if nav_queue == 1 else 's' }}{% if nav_queue_danger %}, life-safety among them{% endif %}">{{ nav_queue }}</span>{% endif %}</a>
+    <a href="/" class="aux">Customer site ↗</a>
   </nav>
+{% endblock %}
 </header>
 <main>
 {% block content %}{% endblock %}
 </main>
 <footer>{% block footer %}Every request is processed by the intake pipeline and recorded
-step by step in the audit trail — the admin view reads straight from it.{% endblock %}</footer>
+step by step in the audit trail — this console reads straight from it.{% endblock %}</footer>
 </body>
 </html>
