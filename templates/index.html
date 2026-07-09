@@ -47,9 +47,8 @@ find this request later.</p>
 
 {% else %}
 <h1>Tell us what happened</h1>
-<p class="sub">Flooding, smoke damage, mold, whatever it is. Write it the way you'd
-tell a neighbor. We read every message as soon as it comes in, any hour, and get it
-to the right crew.</p>
+<p class="sub">Flooding, smoke damage, mold, whatever it is: write it the way you'd
+tell a neighbor. We read every message as soon as it comes in, any hour.</p>
 
 <form method="post" action="/">
   <label class="intake-label" for="intake-text">Describe the situation</label>
@@ -57,10 +56,13 @@ to the right crew.</p>
     placeholder="e.g. Our basement flooded overnight after the storm, there's standing water everywhere, and I'm worried about mold. We're in Cedar Park."
     >{{ text }}</textarea>
   <p class="hint">Include where you are and how long it's been happening. It saves the
-  crew a callback. You'll get a reference number as soon as this goes through.</p>
-  <button type="submit">Send request</button>
-  <p class="hint">Rather talk to a person? Call <a href="tel:+15125550148">(512) 555-0148</a>.
-  Someone picks up, even at 3am.</p>
+  crew a callback.</p>
+  <div class="cta-row">
+    <button type="submit">Send request</button>
+    <a class="btn-line" href="tel:+15125550148">Or call (512) 555-0148</a>
+  </div>
+  <p class="hint">Sending gets you a reference number right away. Calling gets a person,
+  even at 3am.</p>
 </form>
 
 {% if error %}
