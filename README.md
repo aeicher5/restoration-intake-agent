@@ -11,8 +11,8 @@ confidence, escalates to a human when warranted, and records an audit trail of
 every decision. There's a customer intake page on the front and an admin view
 over the trail on the back.
 
-It started as a one-hour live build, then got extended the same evening by
-three Claude Code agents working in parallel git worktrees.
+It started as a one-hour live build, then got extended in a single evening by
+Claude Code agents working in parallel git worktrees.
 [ARCHITECTURE.md](ARCHITECTURE.md) covers the system design and what changes
 at production scale.
 
@@ -52,9 +52,11 @@ flowchart LR
     T --> AD["/admin"]
 ```
 
-![Admin detail view: one request's full audit trail](docs/admin-detail.png)
-*The admin detail view for one request: validation, hazard screen, model
-attempts with token usage, the confidence gate, and where it ended up.*
+**Live demo:** [www.restorationintake.com](https://www.restorationintake.com)
+is the customer intake; the dispatcher's escalation queue is at
+[/admin/queue](https://www.restorationintake.com/admin/queue), and every
+request's full audit trail (validation, hazard screen, model attempts with
+token usage, the confidence gate, where it ended up) is one click deep.
 
 ## Quickstart
 
