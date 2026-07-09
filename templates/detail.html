@@ -19,10 +19,29 @@
     <dd>
       {% if record.escalate_to_human %}
       <span class="badge human">human review</span>
+      {% if wf %}
+      {% if wf.life_safety and wf.state != 'resolved' %}<span class="badge danger">life safety</span>{% endif %}
+      <span class="chip {% if wf.state == 'resolved' %}good{% elif wf.state == 'acknowledged' %}ack{% else %}warn{% endif %}">{{ wf.state }}</span>
+      {% if wf.state != 'resolved' %}<a href="/admin/queue" style="font-size:.85rem">→ queue</a>{% endif %}
+      {% endif %}
       {% else %}
       <span class="badge auto">auto</span>
       {% endif %}
     </dd>
+    {% if wf and wf.resolution %}
+    <dt>human decision</dt>
+    <dd>
+      {% if wf.resolution.resolution == 'corrected' %}
+      <span class="chip warn">corrected</span>
+      <s class="muted">{{ wf.resolution.original_type.replace('_', ' ') }}</s>
+      → <span class="chip">{{ wf.resolution.request_type.replace('_', ' ') }}</span>
+      {% else %}
+      <span class="chip good">confirmed</span>
+      <span class="chip">{{ wf.resolution.request_type.replace('_', ' ') }}</span>
+      {% endif %}
+      {% if wf.resolution.note %}<br><span class="muted">“{{ wf.resolution.note }}”</span>{% endif %}
+    </dd>
+    {% endif %}
     {% if path %}
     <dt>model path</dt>
     <dd>
@@ -49,7 +68,8 @@
 
 <h2>Audit trail</h2>
 <p class="sub">Every pipeline step in order, with the exact values recorded at that step —
-including model attempts, token usage, errors, and the escalation decision.</p>
+including model attempts, token usage, errors, and the escalation decision. Where a human
+worked the request, the <code>escalation_*</code> workflow events continue the same trail.</p>
 {% for step in steps %}
 <div class="step{% if step.safety %} safety-{{ step.safety }}{% endif %}">
   <div class="step-head">

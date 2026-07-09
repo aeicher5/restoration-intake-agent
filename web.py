@@ -51,10 +51,12 @@ from fastapi.templating import Jinja2Templates
 from agent import (
     ConfigError,
     IntakeAgent,
+    RequestType,
     Settings,
     ValidationError,
     load_env,
 )
+from escalations import EscalationWorkflow, WorkflowError, is_workflow_event
 
 log = logging.getLogger("intake.web")
 
@@ -86,6 +88,11 @@ class AuditStore:
 
     One JSON object per line, written after every pipeline run. Corrupt lines
     are skipped on read (with a warning) rather than poisoning the admin view.
+
+    The same file also carries escalation-workflow event lines (see
+    escalations.py), appended through the same interface. The record-reading
+    methods below filter them out; read_raw() exposes every line for the
+    workflow to fold.
     """
 
     def __init__(self, path: Path):
@@ -114,14 +121,22 @@ class AuditStore:
                 log.warning("skipping corrupt audit line %s:%d", self.path, line_num)
         return records
 
+    def read_raw(self) -> list[dict[str, Any]]:
+        """Every stored line, oldest first — request records and workflow
+        events alike. The escalation workflow derives state from this."""
+        return self._read_all()
+
+    def _records(self) -> list[dict[str, Any]]:
+        return [line for line in self._read_all() if not is_workflow_event(line)]
+
     def list_newest_first(self) -> list[dict[str, Any]]:
-        return list(reversed(self._read_all()))
+        return list(reversed(self._records()))
 
     def get(self, request_id: str) -> "dict[str, Any] | None":
-        return next((r for r in self._read_all() if r.get("request_id") == request_id), None)
+        return next((r for r in self._records() if r.get("request_id") == request_id), None)
 
     def count(self) -> int:
-        return len(self._read_all())
+        return len(self._records())
 
 
 # ----------------------------------------------------------------- rate limit
@@ -330,6 +345,7 @@ except ConfigError as exc:
     raise SystemExit(f"web.py startup failed: {exc}") from exc
 AGENT = IntakeAgent(SETTINGS)  # constructs the SDK client; no network call yet
 STORE = AuditStore(Path(os.environ.get("INTAKE_AUDIT_LOG", DEFAULT_AUDIT_LOG)))
+WORKFLOW = EscalationWorkflow(STORE)  # escalation state machine over the same store
 
 # POST / triggers a model pipeline run, so it is the endpoint worth guarding.
 # Defaults are generous for a human, tight for a script; env-tunable for ops.
@@ -463,6 +479,14 @@ def intake_submit(request: Request, text: str = Form("")) -> HTMLResponse:
 
     record = make_record(analysis.to_dict())
     STORE.append(record)
+    if record.get("escalate_to_human"):
+        # A failure here must not cost the customer their confirmation page:
+        # an escalated record with no opened event derives as implicitly open,
+        # so the queue still picks it up.
+        try:
+            WORKFLOW.open_for(record)
+        except Exception:
+            log.exception("failed to open escalation for %s", record.get("request_id"))
     return templates.TemplateResponse(
         request, "index.html",
         {"active": "intake", "result": record, "error": None, "text": ""},
@@ -516,10 +540,90 @@ def admin_list(request: Request) -> Response:
     if denied is not None:
         return denied
     records = STORE.list_newest_first()
+    wf_states = WORKFLOW.states_by_request()
+    unresolved = [s for s in wf_states.values() if s["state"] != "resolved"]
+    queue_counts = {
+        "unresolved": len(unresolved),
+        "life_safety": sum(1 for s in unresolved if s["life_safety"]),
+    }
     return templates.TemplateResponse(
         request, "admin.html",
-        {"active": "admin", "records": records, "stats": build_stats(records)},
+        {"active": "admin", "records": records, "stats": build_stats(records),
+         "wf_states": wf_states, "queue_counts": queue_counts},
     )
+
+
+# The human's decision vocabulary when resolving: the same closed enum the
+# classifier picks from, minus the pre-classification sentinel — a dispatcher
+# resolving a request must land it on a real type.
+RESOLVABLE_TYPES = [t.value for t in RequestType if t is not RequestType.UNKNOWN]
+
+# Post-action feedback rendered on the queue page. Actions redirect with
+# ?notice=<code> (never free text — codes only, so nothing user-controlled is
+# reflected); unknown codes render nothing.
+QUEUE_NOTICES = {
+    "acknowledged": ("ok", "Acknowledged — it stays in the queue until resolved."),
+    "resolved": ("ok", "Resolved — the decision is recorded in the request's audit trail."),
+    "already_acknowledged": ("warn", "Already acknowledged, likely by another dispatcher just now."),
+    "already_resolved": ("warn", "Already resolved, likely by another dispatcher just now — it has left the queue."),
+    "not_found": ("warn", "No such request in the audit store."),
+    "not_escalated": ("warn", "That request was never escalated — nothing to work."),
+    "bad_type": ("warn", "Resolving needs a valid request type — pick one from the list."),
+}
+
+
+# NOTE: registered before /admin/{request_id}, which would otherwise capture
+# the literal path segment "queue" as a request id.
+@app.get("/admin/queue", response_class=HTMLResponse)
+def admin_queue(request: Request) -> Response:
+    denied = _admin_guard(request)
+    if denied is not None:
+        return denied
+    entries = WORKFLOW.queue_entries()
+    counts = {
+        "open": sum(1 for e in entries if e["wf"]["state"] == "open"),
+        "acknowledged": sum(1 for e in entries if e["wf"]["state"] == "acknowledged"),
+        "life_safety": sum(1 for e in entries if e["wf"]["life_safety"]),
+    }
+    return templates.TemplateResponse(
+        request, "queue.html",
+        {"active": "queue", "entries": entries, "counts": counts,
+         "resolvable_types": RESOLVABLE_TYPES,
+         "notice": QUEUE_NOTICES.get(request.query_params.get("notice", ""))},
+    )
+
+
+def _queue_redirect(notice: str) -> RedirectResponse:
+    return RedirectResponse(f"/admin/queue?notice={notice}", status_code=303)
+
+
+@app.post("/admin/queue/{request_id}/ack")
+def admin_queue_ack(request: Request, request_id: str) -> Response:
+    denied = _admin_guard(request)
+    if denied is not None:
+        return denied
+    try:
+        WORKFLOW.acknowledge(request_id)
+    except WorkflowError as exc:
+        return _queue_redirect(exc.code)
+    return _queue_redirect("acknowledged")
+
+
+@app.post("/admin/queue/{request_id}/resolve")
+def admin_queue_resolve(request: Request, request_id: str,
+                        request_type: str = Form(""), note: str = Form("")) -> Response:
+    denied = _admin_guard(request)
+    if denied is not None:
+        return denied
+    if request_type not in RESOLVABLE_TYPES:
+        return _queue_redirect("bad_type")
+    try:
+        # The note is free text headed for an append-only audit line; cap it
+        # so a runaway paste can't bloat the store (form maxlength is 500).
+        WORKFLOW.resolve(request_id, request_type, note=note[:2000])
+    except WorkflowError as exc:
+        return _queue_redirect(exc.code)
+    return _queue_redirect("resolved")
 
 
 @app.get("/admin/{request_id}", response_class=HTMLResponse)
@@ -546,16 +650,33 @@ def admin_detail(request: Request, request_id: str) -> Response:
             "recorded": recorded,
             "safety": step_safety_flag(name, recorded),
         })
+    # The trail no longer ends where the human begins: escalation-workflow
+    # events continue it, rendered by the same generic step renderer.
+    for event in WORKFLOW.events_for(request_id):
+        name = event.get("event", "escalation_event")
+        recorded = {k: v for k, v in event.items()
+                    if k not in ("kind", "event", "request_id", "at")}
+        steps.append({
+            "name": name,
+            "at": event.get("at", ""),
+            "recorded": recorded,
+            "safety": step_safety_flag(name, recorded),
+        })
     return templates.TemplateResponse(
         request, "detail.html",
         {"active": "admin", "record": record, "request_id": request_id,
-         "steps": steps, "path": escalation_path(record)},
+         "steps": steps, "path": escalation_path(record),
+         "wf": WORKFLOW.state_of(request_id)},
     )
 
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "config": SETTINGS.summary(), "stored_requests": STORE.count()}
+    unresolved = WORKFLOW.queue_entries()
+    return {"status": "ok", "config": SETTINGS.summary(),
+            "stored_requests": STORE.count(),
+            "open_escalations": len(unresolved),
+            "life_safety_open": sum(1 for e in unresolved if e["wf"]["life_safety"])}
 
 
 # ------------------------------------------------------------------ entrypoint

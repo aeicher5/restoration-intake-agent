@@ -17,6 +17,11 @@
     <span class="stat-sub">{{ stats.escalated }} of {{ stats.total }} to human review</span>
   </div>
   <div class="stat">
+    <span class="stat-label">Escalation queue</span>
+    <span class="stat-value"{% if queue_counts.life_safety %} style="color:#b91c1c"{% endif %}>{{ queue_counts.unresolved }}</span>
+    <span class="stat-sub">{% if queue_counts.life_safety %}{{ queue_counts.life_safety }} life-safety · {% endif %}<a href="/admin/queue">work the queue →</a></span>
+  </div>
+  <div class="stat">
     <span class="stat-label">Opus rereads</span>
     <span class="stat-value">{{ stats.rereads }}</span>
     <span class="stat-sub">low-confidence second opinions</span>
@@ -73,6 +78,11 @@
         <span class="badge rejected">rejected</span>
         {% elif r.escalate_to_human %}
         <span class="badge human">human review</span>
+        {% set wf = wf_states.get(r.request_id) %}
+        {% if wf %}
+        {% if wf.life_safety and wf.state != 'resolved' %}<span class="badge danger">life safety</span>{% endif %}
+        <span class="chip {% if wf.state == 'resolved' %}good{% elif wf.state == 'acknowledged' %}ack{% else %}warn{% endif %}">{{ wf.state }}</span>
+        {% endif %}
         {% else %}
         <span class="badge auto">auto</span>
         {% endif %}

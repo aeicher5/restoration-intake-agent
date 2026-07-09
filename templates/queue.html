@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Restoration Intake — Escalation queue{% endblock %}
+{% block width %}960px{% endblock %}
+{% block content %}
+<h1>Escalation queue</h1>
+<p class="sub">Every unresolved escalation, life-safety first, then newest first.
+Acknowledge to take ownership; resolve to record the human decision — it lands in the
+request's audit trail as an <code>escalation_resolved</code> event.</p>
+
+{% if notice %}
+<div class="notice {{ notice[0] }}">{{ notice[1] }}</div>
+{% endif %}
+
+{% if entries %}
+<div class="stats-strip">
+  <div class="stat">
+    <span class="stat-label">Life-safety</span>
+    <span class="stat-value"{% if counts.life_safety %} style="color:#b91c1c"{% endif %}>{{ counts.life_safety }}</span>
+    <span class="stat-sub">unresolved emergencies</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">Open</span>
+    <span class="stat-value">{{ counts.open }}</span>
+    <span class="stat-sub">waiting for a dispatcher</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">Acknowledged</span>
+    <span class="stat-value">{{ counts.acknowledged }}</span>
+    <span class="stat-sub">owned, not yet resolved</span>
+  </div>
+</div>
+
+{% for e in entries %}
+{% set r = e.record %}{% set wf = e.wf %}
+<div class="esc-card{% if wf.life_safety %} life-safety{% endif %}">
+  <div class="esc-head">
+    {% if wf.life_safety %}<span class="badge danger pulse">life safety</span>{% endif %}
+    <span class="chip {% if wf.state == 'acknowledged' %}ack{% else %}warn{% endif %}">{{ wf.state }}</span>
+    <a href="/admin/{{ r.request_id }}"><code>{{ r.request_id }}</code></a>
+    <span class="chip">{{ r.request_type.replace('_', ' ') }}</span>
+    <span class="muted">conf {{ "%.2f"|format(r.confidence) }}</span>
+    {# the life-safety badge already says it — no duplicate reason chip #}
+    {% for reason in wf.reasons if reason != 'life_safety' %}
+    <span class="chip mini">{{ reason.replace('_', ' ') }}</span>
+    {% endfor %}
+    <span class="at">opened {{ wf.opened_at | ts }}</span>
+  </div>
+  <p class="esc-text">{{ r.raw_text[:220] }}{% if r.raw_text|length > 220 %}…{% endif %}</p>
+  {% if r.notes %}<p class="esc-meta">{{ r.notes }}</p>{% endif %}
+  <div class="esc-actions">
+    {% if wf.state == 'open' %}
+    <form method="post" action="/admin/queue/{{ r.request_id }}/ack">
+      <button type="submit" class="secondary">Acknowledge</button>
+    </form>
+    {% else %}
+    <span class="muted" style="font-size:.85rem">acknowledged {{ wf.acknowledged_at | ts }}</span>
+    {% endif %}
+    <form method="post" action="/admin/queue/{{ r.request_id }}/resolve" class="resolve">
+      <label class="muted" style="font-size:.85rem" for="type-{{ r.request_id }}">resolve as</label>
+      <select name="request_type" id="type-{{ r.request_id }}" required>
+        {% if r.request_type not in resolvable_types %}
+        <option value="" disabled selected>choose type…</option>
+        {% endif %}
+        {% for t in resolvable_types %}
+        <option value="{{ t }}"{% if t == r.request_type %} selected{% endif %}>{{ t.replace('_', ' ') }}{% if t == r.request_type %} — as classified{% endif %}</option>
+        {% endfor %}
+      </select>
+      <input type="text" name="note" maxlength="500"
+             placeholder="note — what you verified or decided (optional)">
+      <button type="submit">Resolve</button>
+    </form>
+  </div>
+</div>
+{% endfor %}
+{% else %}
+<div class="table-wrap">
+  <div class="empty">
+    <p style="margin:0 0 .4rem"><strong>Queue clear.</strong></p>
+    <p style="margin:0">No unresolved escalations. New life-safety or human-review
+    requests appear here the moment they land — see <a href="/admin">all requests</a>.</p>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+{% block footer %}Acknowledge and resolve append <code>escalation_*</code> events to the
+same append-only audit store the pipeline writes — the workflow state above is derived
+from that trail, never stored separately.{% endblock %}
