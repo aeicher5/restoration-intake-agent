@@ -1,15 +1,29 @@
 {% extends "base.html" %}
 {% block title %}Restoration Intake — Request help{% endblock %}
 {% block content %}
+<p class="notice warn emergency">If anyone is in danger right now — fire still burning,
+structural collapse, sewage in living space — <strong>call 911 first.</strong>
+Then send this, and we'll take the property from there.</p>
+
 <h1>Tell us what happened</h1>
-<p class="sub">Describe the problem in your own words — water, fire, smoke, mold, storm
-damage, anything. Our intake system reads it immediately and routes it to the right team.</p>
+<p class="sub">Water, fire, smoke, mold, storm damage — describe it in your own words.
+Your message is read the moment it arrives, day or night, and routed to the right team.</p>
 
 <form method="post" action="/">
-  <textarea name="text" placeholder="e.g. Our basement flooded overnight after the storm — standing water everywhere, and I'm worried about mold. We're in Cedar Park."
+  <label class="intake-label" for="intake-text">Describe the situation</label>
+  <textarea id="intake-text" name="text" placeholder="e.g. Our basement flooded overnight after the storm — standing water everywhere, and I'm worried about mold. We're in Cedar Park."
     >{{ text }}</textarea>
-  <button type="submit">Submit request</button>
+  <p class="hint">Fastest if you include what happened, where you are, and how long it's
+  been going on. You'll get a reference number right away.</p>
+  <button type="submit">Send request</button>
 </form>
+
+<ol class="next-steps">
+  <li><b>Read immediately.</b> Our intake system assesses your message the moment it lands.</li>
+  <li><b>Routed right.</b> It goes straight to the matching crew — anything urgent or
+  unclear goes to a human coordinator.</li>
+  <li><b>Tracked.</b> Your reference number follows the request from first read to dispatch.</li>
+</ol>
 
 {% if error %}
 <div class="card error">
@@ -21,10 +35,11 @@ damage, anything. Our intake system reads it immediately and routes it to the ri
 {% if result %}
 {% set type_label = 'pending review' if result.request_type == 'unknown'
                     else result.request_type.replace('_', ' ') %}
-<div class="card">
-  <h2 style="margin-top:0">Request received ✓</h2>
+<div class="card result-card">
+  <h2>Request received ✓</h2>
+  <p class="ref-line">Your reference: <code class="ref">{{ result.request_id }}</code> —
+  keep it handy, it identifies this request from here on.</p>
   <dl>
-    <dt>reference</dt><dd><code>{{ result.request_id }}</code></dd>
     <dt>assessed as</dt><dd><span class="chip">{{ type_label }}</span></dd>
     <dt>confidence</dt><dd>{{ "%.2f"|format(result.confidence) }}</dd>
     <dt>status</dt>
@@ -45,8 +60,8 @@ damage, anything. Our intake system reads it immediately and routes it to the ri
     <p>{{ result.extras.customer_reply }}</p>
   </div>
   {% endif %}
-  <p class="muted" style="margin-bottom:0"><small>Keep your reference number handy —
-  it identifies this request from here on.</small></p>
 </div>
 {% endif %}
 {% endblock %}
+{% block footer %}Every request gets a reference number the moment it arrives, and a
+documented trail that follows it from first read to crew dispatch.{% endblock %}
