@@ -265,17 +265,6 @@
                   text-transform: uppercase; letter-spacing: .07em; color: var(--slate); }
   .hint { color: var(--faint); font-size: .8rem; margin: .5rem 0 0; }
   .hint a, .sub a { color: var(--accent-deep); }
-  ol.next-steps { list-style: none; counter-reset: step; margin: 2rem 0 0; padding: 0;
-                  display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-                  gap: .75rem; }
-  .next-steps li { counter-increment: step; background: var(--surface);
-                   border: 1px solid var(--line); border-radius: 8px;
-                   padding: .8rem .95rem .75rem; font-size: .85rem; color: var(--slate); }
-  .next-steps li::before { content: counter(step, decimal-leading-zero); display: block;
-                           font-family: var(--mono); font-size: .75rem; font-weight: 500;
-                           color: var(--accent-deep); margin-bottom: .3rem;
-                           letter-spacing: .05em; }
-  .next-steps b { color: var(--ink); }
   .result-card h2 { margin: 0; }
   .ref-line { margin: .4rem 0 1rem; color: var(--slate); font-size: .9rem; }
   code.ref { font-size: .95rem; background: var(--accent-tint);
