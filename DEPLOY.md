@@ -23,6 +23,14 @@ the repo's `Dockerfile` is the offline-selftest image (no fastapi/uvicorn) and
 Railway would otherwise auto-select it and crash-loop. Nixpacks reads
 `runtime.txt` (Python 3.12, matching CI) and installs `requirements.txt`.
 
+> Observed on the first live deploy (2026-07-08): on **CLI uploads**
+> (`railway up`), Railway's build detection preferred the Dockerfile it found
+> in the upload despite the `railway.toml` pin — producing exactly the
+> selftest-image crash-loop described above (the container runs the offline
+> selftest, exits, and the `/health` check never answers). `.railwayignore`
+> now excludes `Dockerfile`/`.dockerignore` from uploads, which makes the
+> Nixpacks pin unconditional. Keep it.
+
 1. Create the project (dashboard: *New Project → Deploy from GitHub repo*, or CLI):
 
    ```bash

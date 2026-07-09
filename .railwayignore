@@ -1,0 +1,7 @@
+# Railway builds this app with Nixpacks (see railway.toml). The repo's
+# Dockerfile is the offline-selftest image (agent.py + SDK only, no web
+# stack); on CLI uploads Railway's build detection preferred that Dockerfile
+# over the config-as-code builder pin — observed live on the first deploy.
+# Excluding it from uploads makes the Nixpacks pin unconditional.
+Dockerfile
+.dockerignore
