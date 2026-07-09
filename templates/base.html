@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}Restoration Intake{% endblock %}</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231c6e45'/%3E%3Cpath d='M16 6C16 6 9 14.5 9 19a7 7 0 0 0 14 0C23 14.5 16 6 16 6Z' fill='%23fff'/%3E%3C/svg%3E">
 <style>
   * { box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -58,6 +59,24 @@
   .type-mix { margin-top: .6rem; display: flex; flex-wrap: wrap; gap: .4rem;
               align-items: baseline; }
   .type-mix .chip b { font-weight: 600; color: #5b6570; }
+  a.chip { text-decoration: none; }
+  a.chip:hover { background: #e2e8ec; }
+  .chip.on { background: #1c6e45; color: #fff; }
+  .chip.on b { color: #d9f2e4; }
+  /* admin filter bar */
+  .filter-bar { display: flex; flex-wrap: wrap; gap: .6rem .9rem; align-items: flex-end;
+                margin-top: 1.25rem; }
+  .filter-bar label { display: flex; flex-direction: column; gap: .2rem;
+                      color: #5b6570; font-size: .75rem; }
+  .filter-bar select, .filter-bar input[type=search] {
+    font: inherit; font-size: .85rem; padding: .38rem .55rem;
+    border: 1px solid #c6ccd2; border-radius: 8px; background: #fff; color: inherit; }
+  .filter-bar .grow { flex: 1 1 14rem; }
+  .filter-bar input[type=search] { width: 100%; }
+  .filter-bar button { margin-top: 0; padding: .42rem 1rem; font-size: .85rem; }
+  .filter-count { color: #5b6570; font-size: .85rem; margin-left: auto; align-self: center;
+                  font-variant-numeric: tabular-nums; }
+  .filter-count a { color: #1c6e45; }
   td.conf { font-variant-numeric: tabular-nums; }
   .table-wrap { background: #fff; border: 1px solid #dde1e5; border-radius: 10px;
                 margin-top: 1.25rem; overflow-x: auto; }

@@ -392,6 +392,9 @@ templates.env.filters["usd"] = _format_usd
 
 _ADMIN_DENIED_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Admin — token required</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' \
+viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231c6e45'/%3E%3Cpath \
+d='M16 6C16 6 9 14.5 9 19a7 7 0 0 0 14 0C23 14.5 16 6 16 6Z' fill='%23fff'/%3E%3C/svg%3E">
 <style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
 background:#f4f4f2;color:#1e2226;display:grid;place-items:center;min-height:100vh;margin:0}
 .card{background:#fff;border:1px solid #dde1e5;border-radius:10px;padding:1.5rem 2rem;
@@ -516,8 +519,10 @@ def build_stats(records: "list[dict[str, Any]]") -> dict[str, Any]:
         tokens_in += cost["tokens_in"]
         tokens_out += cost["tokens_out"]
         unpriced |= cost["unpriced"]
-        label = str(record.get("request_type", "unknown")).replace("_", " ")
-        type_counts[label] = type_counts.get(label, 0) + 1
+        # Raw type values (not display labels): the admin template linkifies
+        # each chip into a ?type= filter, so the value must round-trip.
+        raw_type = str(record.get("request_type", "unknown"))
+        type_counts[raw_type] = type_counts.get(raw_type, 0) + 1
 
     return {
         "total": total,
@@ -534,6 +539,62 @@ def build_stats(records: "list[dict[str, Any]]") -> dict[str, Any]:
     }
 
 
+# Coarse routing buckets behind the /admin filter bar — the same three ways a
+# request can leave the pipeline that the table's routing column shows, plus
+# "unresolved", which narrows "human" to escalations a dispatcher still owes
+# an answer. (value, label) pairs; the empty value passes everything.
+ROUTING_FILTERS = [
+    ("", "All routing"),
+    ("human", "Human review"),
+    ("unresolved", "Human review — unresolved"),
+    ("auto", "Auto-routed"),
+    ("rejected", "Rejected"),
+]
+
+
+def record_routing(record: Mapping[str, Any]) -> str:
+    """The bucket a record renders under in the admin table's routing column."""
+    if record.get("extras", {}).get("status") == "rejected":
+        return "rejected"
+    if record.get("escalate_to_human"):
+        return "human"
+    return "auto"
+
+
+def filter_records(records: "list[dict[str, Any]]",
+                   wf_states: "Mapping[str, dict[str, Any]]",
+                   type_: str = "", routing: str = "", q: str = "") -> "list[dict[str, Any]]":
+    """Apply the /admin filter-bar selection. Empty values pass everything;
+    the text search is a case-insensitive substring over request id, customer
+    text, and the dispatcher note."""
+    needle = q.strip().lower()
+    shown = []
+    for record in records:
+        if type_ and str(record.get("request_type", "unknown")) != type_:
+            continue
+        if routing:
+            bucket = record_routing(record)
+            if routing == "unresolved":
+                # An escalated record with no workflow events derives as
+                # implicitly open (see intake_submit), so a missing state
+                # still counts as unresolved.
+                wf = wf_states.get(record.get("request_id"))
+                if bucket != "human" or (wf is not None and wf["state"] == "resolved"):
+                    continue
+            elif bucket != routing:
+                continue
+        if needle:
+            hay = " ".join((
+                str(record.get("request_id", "")),
+                str(record.get("raw_text", "")),
+                str(record.get("notes", "")),
+            )).lower()
+            if needle not in hay:
+                continue
+        shown.append(record)
+    return shown
+
+
 @app.get("/admin", response_class=HTMLResponse)
 def admin_list(request: Request) -> Response:
     denied = _admin_guard(request)
@@ -546,9 +607,27 @@ def admin_list(request: Request) -> Response:
         "unresolved": len(unresolved),
         "life_safety": sum(1 for s in unresolved if s["life_safety"]),
     }
+    stats = build_stats(records)  # also stamps cost_usd on every record for the table
+    params = request.query_params
+    filters = {
+        "type": params.get("type", ""),
+        # Unknown routing codes are dropped rather than reflected.
+        "routing": params.get("routing", "") if any(
+            params.get("routing", "") == value for value, _ in ROUTING_FILTERS) else "",
+        "q": params.get("q", "").strip(),
+    }
+    filters["active"] = any(filters.values())
+    type_options = sorted(
+        {str(r.get("request_type", "unknown")) for r in records}
+        | ({filters["type"]} if filters["type"] else set())  # keep an unmatched selection visible
+    )
+    shown = filter_records(records, wf_states,
+                           filters["type"], filters["routing"], filters["q"])
     return templates.TemplateResponse(
         request, "admin.html",
-        {"active": "admin", "records": records, "stats": build_stats(records),
+        {"active": "admin", "records": shown, "total": len(records),
+         "stats": stats, "filters": filters, "type_options": type_options,
+         "routing_options": ROUTING_FILTERS,
          "wf_states": wf_states, "queue_counts": queue_counts},
     )
 

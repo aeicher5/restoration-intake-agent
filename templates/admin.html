@@ -43,13 +43,47 @@
 </div>
 <div class="type-mix">
   <span class="stat-label">Type mix</span>
-  {% for label, count in stats.type_mix %}
-  <span class="chip">{{ label }} <b>×{{ count }}</b></span>
+  {% for value, count in stats.type_mix %}
+  {% if filters.type == value %}
+  <a class="chip on" href="/admin" title="Clear the type filter">{{ value.replace('_', ' ') }} <b>×{{ count }}</b></a>
+  {% else %}
+  <a class="chip" href="/admin?type={{ value | urlencode }}" title="Show only {{ value.replace('_', ' ') }} requests">{{ value.replace('_', ' ') }} <b>×{{ count }}</b></a>
+  {% endif %}
   {% endfor %}
   {% if stats.unpriced %}
   <span class="stat-sub">unpriced models excluded from cost: {{ stats.unpriced | join(", ") }}</span>
   {% endif %}
 </div>
+{% endif %}
+
+{% if total %}
+<form method="get" action="/admin" class="filter-bar">
+  <label>Type
+    <select name="type" onchange="this.form.submit()">
+      <option value="">All types</option>
+      {% for t in type_options %}
+      <option value="{{ t }}"{% if filters.type == t %} selected{% endif %}>{{ t.replace('_', ' ') }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Routing
+    <select name="routing" onchange="this.form.submit()">
+      {% for value, label in routing_options %}
+      <option value="{{ value }}"{% if filters.routing == value %} selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="grow">Search
+    <input type="search" name="q" value="{{ filters.q }}"
+           placeholder="request id, customer text, or dispatcher note">
+  </label>
+  <button type="submit" class="secondary">Filter</button>
+  <span class="filter-count">
+    {% if filters.active %}
+    Showing {{ records | length }} of {{ total }} · <a href="/admin">clear filters</a>
+    {% else %}{{ total }} request{{ '' if total == 1 else 's' }}{% endif %}
+  </span>
+</form>
 {% endif %}
 
 <div class="table-wrap">
@@ -93,6 +127,11 @@
     {% endfor %}
   </tbody>
 </table>
+{% elif filters.active %}
+<div class="empty">
+  <p style="margin:0 0 .4rem"><strong>No requests match these filters.</strong></p>
+  <p style="margin:0"><a href="/admin">Clear filters</a> to see all {{ total }} requests.</p>
+</div>
 {% else %}
 <div class="empty">
   <p style="margin:0 0 .4rem"><strong>No requests yet.</strong></p>
