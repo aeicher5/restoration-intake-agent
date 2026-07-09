@@ -272,8 +272,10 @@
              border: 1px solid var(--accent-line); color: var(--accent-deep);
              padding: .15rem .5rem; }
 
-  footer { max-width: {{ self.width() }}; margin: 2.25rem auto 2.5rem;
+  footer { max-width: {{ self.width() }}; margin: 3.25rem auto 2.5rem;
            padding: 0 1.25rem; color: var(--faint); font-size: .78rem; }
+  footer::before { content: ""; display: block; border-top: 1px solid var(--line);
+                   margin-bottom: 1.1rem; }
 
   a:focus-visible, button:focus-visible, select:focus-visible, input:focus-visible,
   textarea:focus-visible, summary:focus-visible {
