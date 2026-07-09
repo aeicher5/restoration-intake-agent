@@ -35,8 +35,14 @@ jobs:
       - name: Pipeline selftest (offline, fake client)
         run: python3 agent.py --selftest
 
+      - name: Escalation state-machine selftest (offline, stdlib)
+        run: python3 escalations.py
+
       - name: Extended evals — schema and scorer check (offline)
         run: python3 evals/run_extended.py --check
+
+      - name: Correction-ingest selftest (offline, synthetic log)
+        run: python3 evals/ingest_corrections.py --selftest
 
       - name: Web layer import smoke
         # web.py fails fast at import without ANTHROPIC_API_KEY, so the import
