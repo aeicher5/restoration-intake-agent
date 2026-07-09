@@ -1,11 +1,12 @@
 {% extends "base.html" %}
-{% block title %}Restoration Intake — Escalation queue{% endblock %}
+{% block title %}Dispatch — escalation queue{% endblock %}
 {% block width %}960px{% endblock %}
 {% block content %}
 <h1>Escalation queue</h1>
 <p class="sub">Every unresolved escalation, life-safety first, then newest first.
 Acknowledge to take ownership; resolve to record the human decision — it lands in the
-request's audit trail as an <code>escalation_resolved</code> event.</p>
+request's audit trail as an <code>escalation_resolved</code> event.
+Refreshes itself every 30 seconds unless you're mid-action.</p>
 
 {% if notice %}
 <div class="notice {{ notice[0] }}">{{ notice[1] }}</div>
@@ -15,7 +16,7 @@ request's audit trail as an <code>escalation_resolved</code> event.</p>
 <div class="stats-strip">
   <div class="stat">
     <span class="stat-label">Life-safety</span>
-    <span class="stat-value"{% if counts.life_safety %} style="color:#b91c1c"{% endif %}>{{ counts.life_safety }}</span>
+    <span class="stat-value{% if counts.life_safety %} alert{% endif %}">{{ counts.life_safety }}</span>
     <span class="stat-sub">unresolved emergencies</span>
   </div>
   <div class="stat">
@@ -38,12 +39,13 @@ request's audit trail as an <code>escalation_resolved</code> event.</p>
     <span class="chip {% if wf.state == 'acknowledged' %}ack{% else %}warn{% endif %}">{{ wf.state }}</span>
     <a href="/admin/{{ r.request_id }}"><code>{{ r.request_id }}</code></a>
     <span class="chip">{{ r.request_type.replace('_', ' ') }}</span>
-    <span class="muted">conf {{ "%.2f"|format(r.confidence) }}</span>
+    <span class="muted conf-meter">conf <span class="track"><span class="fill"
+      style="width:{{ r.confidence | confpct }}%"></span></span>{{ "%.2f"|format(r.confidence) }}</span>
     {# the life-safety badge already says it — no duplicate reason chip #}
     {% for reason in wf.reasons if reason != 'life_safety' %}
     <span class="chip mini">{{ reason.replace('_', ' ') }}</span>
     {% endfor %}
-    <span class="at">opened {{ wf.opened_at | ts }}</span>
+    <span class="at">opened <time datetime="{{ wf.opened_at }}" title="{{ wf.opened_at | ts }}">{{ wf.opened_at | age }}</time></span>
   </div>
   <p class="esc-text">{{ r.raw_text[:220] }}{% if r.raw_text|length > 220 %}…{% endif %}</p>
   {% if r.notes %}<p class="esc-meta">{{ r.notes }}</p>{% endif %}
@@ -53,7 +55,8 @@ request's audit trail as an <code>escalation_resolved</code> event.</p>
       <button type="submit" class="secondary">Acknowledge</button>
     </form>
     {% else %}
-    <span class="muted" style="font-size:.85rem">acknowledged {{ wf.acknowledged_at | ts }}</span>
+    <span class="muted" style="font-size:.85rem">acknowledged
+      <time datetime="{{ wf.acknowledged_at }}" title="{{ wf.acknowledged_at | ts }}">{{ wf.acknowledged_at | age }}</time></span>
     {% endif %}
     <form method="post" action="/admin/queue/{{ r.request_id }}/resolve" class="resolve">
       <label class="muted" style="font-size:.85rem" for="type-{{ r.request_id }}">resolve as</label>
@@ -65,7 +68,7 @@ request's audit trail as an <code>escalation_resolved</code> event.</p>
         <option value="{{ t }}"{% if t == r.request_type %} selected{% endif %}>{{ t.replace('_', ' ') }}{% if t == r.request_type %} — as classified{% endif %}</option>
         {% endfor %}
       </select>
-      <input type="text" name="note" maxlength="500"
+      <input type="text" name="note" maxlength="500" aria-label="Resolution note"
              placeholder="note — what you verified or decided (optional)">
       <button type="submit">Resolve</button>
     </form>
@@ -81,6 +84,20 @@ request's audit trail as an <code>escalation_resolved</code> event.</p>
   </div>
 </div>
 {% endif %}
+
+<script>
+  // Keep the queue current without yanking a dispatcher mid-action: skip the
+  // refresh while the tab is hidden, while focus sits inside a form, or once
+  // anything has been typed or picked. location.replace drops ?notice= so
+  // action feedback doesn't outlive its moment.
+  let touched = false;
+  document.addEventListener("input", () => { touched = true; }, true);
+  setInterval(() => {
+    if (document.hidden || touched) return;
+    if (document.activeElement && document.activeElement.closest("form")) return;
+    window.location.replace("/admin/queue");
+  }, 30000);
+</script>
 {% endblock %}
 {% block footer %}Acknowledge and resolve append <code>escalation_*</code> events to the
 same append-only audit store the pipeline writes — the workflow state above is derived

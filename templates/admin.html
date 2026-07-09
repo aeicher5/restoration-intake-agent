@@ -1,9 +1,10 @@
 {% extends "base.html" %}
-{% block title %}Restoration Intake — Admin{% endblock %}
+{% block title %}Dispatch — requests{% endblock %}
 {% block width %}960px{% endblock %}
 {% block content %}
-<h1>Processed requests</h1>
-<p class="sub">Read from the audit store, newest first. Click a row for the full audit trail.</p>
+<h1>Requests</h1>
+<p class="sub">Everything the pipeline has processed, newest first — read straight from the
+audit store. Click a row for the full trail.</p>
 
 {% if stats.total %}
 <div class="stats-strip">
@@ -18,11 +19,11 @@
   </div>
   <div class="stat">
     <span class="stat-label">Escalation queue</span>
-    <span class="stat-value"{% if queue_counts.life_safety %} style="color:#b91c1c"{% endif %}>{{ queue_counts.unresolved }}</span>
+    <span class="stat-value{% if queue_counts.life_safety %} alert{% endif %}">{{ queue_counts.unresolved }}</span>
     <span class="stat-sub">{% if queue_counts.life_safety %}{{ queue_counts.life_safety }} life-safety · {% endif %}<a href="/admin/queue">work the queue →</a></span>
   </div>
   <div class="stat">
-    <span class="stat-label">Opus rereads</span>
+    <span class="stat-label">Escalation rereads</span>
     <span class="stat-value">{{ stats.rereads }}</span>
     <span class="stat-sub">low-confidence second opinions</span>
   </div>
@@ -43,8 +44,12 @@
 </div>
 <div class="type-mix">
   <span class="stat-label">Type mix</span>
-  {% for label, count in stats.type_mix %}
-  <span class="chip">{{ label }} <b>×{{ count }}</b></span>
+  {% for value, count in stats.type_mix %}
+  {% if filters.type == value %}
+  <a class="chip on" href="/admin" title="Clear the type filter">{{ value.replace('_', ' ') }} <b>×{{ count }}</b></a>
+  {% else %}
+  <a class="chip" href="/admin?type={{ value | urlencode }}" title="Show only {{ value.replace('_', ' ') }} requests">{{ value.replace('_', ' ') }} <b>×{{ count }}</b></a>
+  {% endif %}
   {% endfor %}
   {% if stats.unpriced %}
   <span class="stat-sub">unpriced models excluded from cost: {{ stats.unpriced | join(", ") }}</span>
@@ -52,18 +57,48 @@
 </div>
 {% endif %}
 
+{% if total %}
+<form method="get" action="/admin" class="filter-bar">
+  <label>Type
+    <select name="type" onchange="this.form.submit()">
+      <option value="">All types</option>
+      {% for t in type_options %}
+      <option value="{{ t }}"{% if filters.type == t %} selected{% endif %}>{{ t.replace('_', ' ') }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Routing
+    <select name="routing" onchange="this.form.submit()">
+      {% for value, label in routing_options %}
+      <option value="{{ value }}"{% if filters.routing == value %} selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="grow">Search
+    <input type="search" name="q" value="{{ filters.q }}"
+           placeholder="request id, customer text, or dispatcher note">
+  </label>
+  <button type="submit" class="secondary">Filter</button>
+  <span class="filter-count">
+    {% if filters.active %}
+    Showing {{ records | length }} of {{ total }} · <a href="/admin">clear filters</a>
+    {% else %}{{ total }} request{{ '' if total == 1 else 's' }}{% endif %}
+  </span>
+</form>
+{% endif %}
+
 <div class="table-wrap">
 {% if records %}
 <table>
   <thead>
     <tr>
-      <th>Received</th>
-      <th>Request</th>
-      <th>Type</th>
-      <th>Conf.</th>
-      <th>Routing</th>
-      <th>Cost</th>
-      <th>Customer text</th>
+      <th scope="col">Received</th>
+      <th scope="col">Request</th>
+      <th scope="col">Type</th>
+      <th scope="col">Conf.</th>
+      <th scope="col">Routing</th>
+      <th scope="col">Cost</th>
+      <th scope="col">Customer text</th>
     </tr>
   </thead>
   <tbody>
@@ -72,7 +107,8 @@
       <td class="muted" style="white-space:nowrap">{{ r.received_at | ts }}</td>
       <td><a href="/admin/{{ r.request_id }}"><code>{{ r.request_id }}</code></a></td>
       <td><span class="chip">{{ r.request_type.replace('_', ' ') }}</span></td>
-      <td>{{ "%.2f"|format(r.confidence) }}</td>
+      <td class="conf"><span class="conf-meter"><span class="track"><span class="fill"
+        style="width:{{ r.confidence | confpct }}%"></span></span>{{ "%.2f"|format(r.confidence) }}</span></td>
       <td>
         {% if r.get('extras', {}).get('status') == 'rejected' %}
         <span class="badge rejected">rejected</span>
@@ -93,6 +129,11 @@
     {% endfor %}
   </tbody>
 </table>
+{% elif filters.active %}
+<div class="empty">
+  <p style="margin:0 0 .4rem"><strong>No requests match these filters.</strong></p>
+  <p style="margin:0"><a href="/admin">Clear filters</a> to see all {{ total }} requests.</p>
+</div>
 {% else %}
 <div class="empty">
   <p style="margin:0 0 .4rem"><strong>No requests yet.</strong></p>

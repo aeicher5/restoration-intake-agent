@@ -40,7 +40,7 @@ import re
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -232,6 +232,37 @@ def step_safety_flag(name: str, recorded: Mapping[str, Any]) -> "str | None":
     return "tripped" if tripped else "clear"
 
 
+# A nested structure whose pretty JSON fits in this many characters starts
+# expanded in the detail view; anything bigger starts collapsed behind its
+# summary line. Purely presentational.
+FIELD_OPEN_JSON_LIMIT = 320
+
+
+def classify_field(key: str, value: Any) -> dict[str, Any]:
+    """Render hint for one recorded audit-step field — decided by the value's
+    shape, never its name, so steps future pipeline stages add render with no
+    changes here (the generic-rendering contract).
+
+    Strings show verbatim (multiline ones keep their line breaks); numbers,
+    booleans and null show JSON-exact; nested dicts/lists show as pretty JSON
+    behind a <details> that starts open only when small.
+    """
+    if isinstance(value, str):
+        return {"key": key, "kind": "multiline" if "\n" in value else "text",
+                "value": value}
+    if isinstance(value, (dict, list)):
+        pretty = _pretty_json(value)
+        count = len(value)
+        unit = ("key" if isinstance(value, dict) else "item") + ("" if count == 1 else "s")
+        summary = f"{count} {unit}"
+        if isinstance(value, dict) and value:
+            preview = ", ".join(list(value)[:3]) + (", …" if count > 3 else "")
+            summary += f" — {preview}"
+        return {"key": key, "kind": "json", "value": pretty,
+                "open": len(pretty) <= FIELD_OPEN_JSON_LIMIT, "summary": summary}
+    return {"key": key, "kind": "code", "value": json.dumps(value)}
+
+
 def iter_usage(node: Any) -> "list[tuple[str | None, int, int]]":
     """Collect (model, input_tokens, output_tokens) for every usage blob
     anywhere in a record's audit trail.
@@ -366,6 +397,29 @@ def _format_timestamp(value: Any) -> str:
         return str(value)
 
 
+def _relative_age(value: Any) -> str:
+    """ISO timestamp -> compact age: 'just now', '4m ago', '3h ago', '2d ago'.
+
+    Server-rendered, so it ages until the next page load — render it next to
+    the absolute stamp (e.g. in a title attribute), never instead of it.
+    """
+    try:
+        then = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return str(value)
+    now = datetime.now(then.tzinfo or timezone.utc)
+    if then.tzinfo is None:  # pipeline stamps are UTC; treat naive ones as such
+        then = then.replace(tzinfo=timezone.utc)
+    seconds = max(0.0, (now - then).total_seconds())
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{int(seconds / 60)}m ago"
+    if seconds < 48 * 3600:
+        return f"{int(seconds / 3600)}h ago"
+    return f"{int(seconds / 86400)}d ago"
+
+
 def _pretty_json(value: Any) -> str:
     return json.dumps(value, indent=2, ensure_ascii=False)
 
@@ -383,20 +437,34 @@ def _format_usd(value: Any) -> str:
     return f"${amount:.2f}"
 
 
+def _confidence_pct(value: Any) -> int:
+    """Confidence 0..1 -> integer percent clamped to [0, 100], for bar widths."""
+    try:
+        return max(0, min(100, round(float(value) * 100)))
+    except (TypeError, ValueError):
+        return 0
+
+
 templates.env.filters["ts"] = _format_timestamp
+templates.env.filters["age"] = _relative_age
 templates.env.filters["pretty"] = _pretty_json
 templates.env.filters["usd"] = _format_usd
+templates.env.filters["confpct"] = _confidence_pct
 
 
 # ------------------------------------------------------------------ admin auth
 
 _ADMIN_DENIED_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Admin — token required</title>
-<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-background:#f4f4f2;color:#1e2226;display:grid;place-items:center;min-height:100vh;margin:0}
-.card{background:#fff;border:1px solid #dde1e5;border-radius:10px;padding:1.5rem 2rem;
-max-width:26rem}h1{font-size:1.05rem;margin:0 0 .4rem}p{margin:.3rem 0;color:#5b6570;
-font-size:.9rem}code{font-family:ui-monospace,Menlo,monospace;background:#f6f8fa;
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' \
+viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2315171E'/%3E%3Cpath \
+d='M16 6C16 6 9 14.5 9 19a7 7 0 0 0 14 0C23 14.5 16 6 16 6Z' fill='%23E4610A'/%3E%3C/svg%3E">
+<style>body{font-family:"IBM Plex Sans",-apple-system,"Segoe UI",sans-serif;
+background:#FAF9F6;color:#23262E;display:grid;place-items:center;min-height:100vh;margin:0}
+.card{background:#fff;border:1px solid #E7E4DE;border-radius:8px;padding:1.5rem 2rem;
+max-width:26rem}h1{font-size:1.05rem;margin:0 0 .4rem;color:#15171E}
+p{margin:.3rem 0;color:#5B6472;font-size:.9rem}
+code{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;background:#F1EFEA;
 padding:.1rem .3rem;border-radius:4px}</style></head>
 <body><div class="card"><h1>Admin access requires a token</h1>
 <p>This deployment gates the admin views. Open
@@ -429,9 +497,15 @@ def _admin_guard(request: Request) -> "Response | None":
 
 @app.get("/", response_class=HTMLResponse)
 def intake_form(request: Request) -> HTMLResponse:
+    # Post/Redirect/Get: after a successful submit the customer lands here
+    # with ?submitted=<id> and the receipt renders from the store — a refresh
+    # re-reads the record instead of re-running the pipeline. Unknown or
+    # missing ids just show the blank form.
+    submitted = request.query_params.get("submitted", "")
+    result = STORE.get(submitted) if submitted else None
     return templates.TemplateResponse(
         request, "index.html",
-        {"active": "intake", "result": None, "error": None, "text": ""},
+        {"active": "intake", "result": result, "error": None, "text": ""},
     )
 
 
@@ -487,10 +561,10 @@ def intake_submit(request: Request, text: str = Form("")) -> HTMLResponse:
             WORKFLOW.open_for(record)
         except Exception:
             log.exception("failed to open escalation for %s", record.get("request_id"))
-    return templates.TemplateResponse(
-        request, "index.html",
-        {"active": "intake", "result": record, "error": None, "text": ""},
-    )
+    # 303 to the GET receipt so a browser refresh can't re-run the pipeline
+    # (or re-bill the model call). Reject/error paths keep their direct
+    # renders — their status codes are the contract.
+    return RedirectResponse(f"/?submitted={record['request_id']}", status_code=303)
 
 
 def build_stats(records: "list[dict[str, Any]]") -> dict[str, Any]:
@@ -516,8 +590,10 @@ def build_stats(records: "list[dict[str, Any]]") -> dict[str, Any]:
         tokens_in += cost["tokens_in"]
         tokens_out += cost["tokens_out"]
         unpriced |= cost["unpriced"]
-        label = str(record.get("request_type", "unknown")).replace("_", " ")
-        type_counts[label] = type_counts.get(label, 0) + 1
+        # Raw type values (not display labels): the admin template linkifies
+        # each chip into a ?type= filter, so the value must round-trip.
+        raw_type = str(record.get("request_type", "unknown"))
+        type_counts[raw_type] = type_counts.get(raw_type, 0) + 1
 
     return {
         "total": total,
@@ -534,6 +610,62 @@ def build_stats(records: "list[dict[str, Any]]") -> dict[str, Any]:
     }
 
 
+# Coarse routing buckets behind the /admin filter bar — the same three ways a
+# request can leave the pipeline that the table's routing column shows, plus
+# "unresolved", which narrows "human" to escalations a dispatcher still owes
+# an answer. (value, label) pairs; the empty value passes everything.
+ROUTING_FILTERS = [
+    ("", "All routing"),
+    ("human", "Human review"),
+    ("unresolved", "Human review — unresolved"),
+    ("auto", "Auto-routed"),
+    ("rejected", "Rejected"),
+]
+
+
+def record_routing(record: Mapping[str, Any]) -> str:
+    """The bucket a record renders under in the admin table's routing column."""
+    if record.get("extras", {}).get("status") == "rejected":
+        return "rejected"
+    if record.get("escalate_to_human"):
+        return "human"
+    return "auto"
+
+
+def filter_records(records: "list[dict[str, Any]]",
+                   wf_states: "Mapping[str, dict[str, Any]]",
+                   type_: str = "", routing: str = "", q: str = "") -> "list[dict[str, Any]]":
+    """Apply the /admin filter-bar selection. Empty values pass everything;
+    the text search is a case-insensitive substring over request id, customer
+    text, and the dispatcher note."""
+    needle = q.strip().lower()
+    shown = []
+    for record in records:
+        if type_ and str(record.get("request_type", "unknown")) != type_:
+            continue
+        if routing:
+            bucket = record_routing(record)
+            if routing == "unresolved":
+                # An escalated record with no workflow events derives as
+                # implicitly open (see intake_submit), so a missing state
+                # still counts as unresolved.
+                wf = wf_states.get(record.get("request_id"))
+                if bucket != "human" or (wf is not None and wf["state"] == "resolved"):
+                    continue
+            elif bucket != routing:
+                continue
+        if needle:
+            hay = " ".join((
+                str(record.get("request_id", "")),
+                str(record.get("raw_text", "")),
+                str(record.get("notes", "")),
+            )).lower()
+            if needle not in hay:
+                continue
+        shown.append(record)
+    return shown
+
+
 @app.get("/admin", response_class=HTMLResponse)
 def admin_list(request: Request) -> Response:
     denied = _admin_guard(request)
@@ -546,10 +678,32 @@ def admin_list(request: Request) -> Response:
         "unresolved": len(unresolved),
         "life_safety": sum(1 for s in unresolved if s["life_safety"]),
     }
+    stats = build_stats(records)  # also stamps cost_usd on every record for the table
+    params = request.query_params
+    filters = {
+        "type": params.get("type", ""),
+        # Unknown routing codes are dropped rather than reflected.
+        "routing": params.get("routing", "") if any(
+            params.get("routing", "") == value for value, _ in ROUTING_FILTERS) else "",
+        "q": params.get("q", "").strip(),
+    }
+    filters["active"] = any(filters.values())
+    type_options = sorted(
+        {str(r.get("request_type", "unknown")) for r in records}
+        | ({filters["type"]} if filters["type"] else set())  # keep an unmatched selection visible
+    )
+    shown = filter_records(records, wf_states,
+                           filters["type"], filters["routing"], filters["q"])
     return templates.TemplateResponse(
         request, "admin.html",
-        {"active": "admin", "records": records, "stats": build_stats(records),
-         "wf_states": wf_states, "queue_counts": queue_counts},
+        {"active": "admin", "records": shown, "total": len(records),
+         "stats": stats, "filters": filters, "type_options": type_options,
+         "routing_options": ROUTING_FILTERS,
+         "wf_states": wf_states, "queue_counts": queue_counts,
+         # nav badge: only admin pages hand these to the template — the
+         # customer intake page never sees queue numbers.
+         "nav_queue": queue_counts["unresolved"],
+         "nav_queue_danger": queue_counts["life_safety"] > 0},
     )
 
 
@@ -589,7 +743,9 @@ def admin_queue(request: Request) -> Response:
         request, "queue.html",
         {"active": "queue", "entries": entries, "counts": counts,
          "resolvable_types": RESOLVABLE_TYPES,
-         "notice": QUEUE_NOTICES.get(request.query_params.get("notice", ""))},
+         "notice": QUEUE_NOTICES.get(request.query_params.get("notice", "")),
+         "nav_queue": len(entries),
+         "nav_queue_danger": counts["life_safety"] > 0},
     )
 
 
@@ -631,11 +787,14 @@ def admin_detail(request: Request, request_id: str) -> Response:
     denied = _admin_guard(request)
     if denied is not None:
         return denied
+    queue = WORKFLOW.queue_entries()
+    nav = {"nav_queue": len(queue),
+           "nav_queue_danger": any(e["wf"]["life_safety"] for e in queue)}
     record = STORE.get(request_id)
     if record is None:
         return templates.TemplateResponse(
             request, "detail.html",
-            {"active": "admin", "record": None, "request_id": request_id},
+            {"active": "admin", "record": None, "request_id": request_id, **nav},
             status_code=404,
         )
     # Key must not collide with a dict method name (e.g. "values"): Jinja's
@@ -647,7 +806,7 @@ def admin_detail(request: Request, request_id: str) -> Response:
         steps.append({
             "name": name,
             "at": step.get("at", ""),
-            "recorded": recorded,
+            "fields": [classify_field(k, v) for k, v in recorded.items()],
             "safety": step_safety_flag(name, recorded),
         })
     # The trail no longer ends where the human begins: escalation-workflow
@@ -659,14 +818,14 @@ def admin_detail(request: Request, request_id: str) -> Response:
         steps.append({
             "name": name,
             "at": event.get("at", ""),
-            "recorded": recorded,
+            "fields": [classify_field(k, v) for k, v in recorded.items()],
             "safety": step_safety_flag(name, recorded),
         })
     return templates.TemplateResponse(
         request, "detail.html",
         {"active": "admin", "record": record, "request_id": request_id,
          "steps": steps, "path": escalation_path(record),
-         "wf": WORKFLOW.state_of(request_id)},
+         "wf": WORKFLOW.state_of(request_id), **nav},
     )
 
 

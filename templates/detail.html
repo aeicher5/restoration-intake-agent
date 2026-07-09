@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Restoration Intake — {{ request_id }}{% endblock %}
+{% block title %}Dispatch — {{ request_id }}{% endblock %}
 {% block width %}960px{% endblock %}
 {% block content %}
 {% if record is none %}
@@ -14,7 +14,8 @@
 <div class="card" style="margin-top:0">
   <dl>
     <dt>type</dt><dd><span class="chip">{{ record.request_type.replace('_', ' ') }}</span></dd>
-    <dt>confidence</dt><dd>{{ "%.2f"|format(record.confidence) }}</dd>
+    <dt>confidence</dt><dd><span class="conf-meter"><span class="track"><span class="fill"
+      style="width:{{ record.confidence | confpct }}%"></span></span>{{ "%.2f"|format(record.confidence) }}</span></dd>
     <dt>routing</dt>
     <dd>
       {% if record.escalate_to_human %}
@@ -81,7 +82,29 @@ worked the request, the <code>escalation_*</code> workflow events continue the s
     {% endif %}
     <span class="at">{{ step.at | ts }}</span>
   </div>
-  <pre>{{ step.recorded | pretty }}</pre>
+  {% if step.fields %}
+  <dl class="step-fields">
+    {% for f in step.fields %}
+    <dt>{{ f.key }}</dt>
+    {% if f.kind == 'json' %}
+    <dd>
+      <details class="field-json"{% if f.open %} open{% endif %}>
+        <summary>{{ f.summary }}</summary>
+        <pre>{{ f.value }}</pre>
+      </details>
+    </dd>
+    {% elif f.kind == 'multiline' %}
+    <dd class="pre-line">{{ f.value }}</dd>
+    {% elif f.kind == 'code' %}
+    <dd><code>{{ f.value }}</code></dd>
+    {% else %}
+    <dd>{{ f.value }}</dd>
+    {% endif %}
+    {% endfor %}
+  </dl>
+  {% else %}
+  <p class="muted" style="margin:.45rem 0 0"><small>nothing recorded beyond the step itself</small></p>
+  {% endif %}
 </div>
 {% endfor %}
 {% endif %}

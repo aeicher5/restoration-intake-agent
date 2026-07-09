@@ -1,37 +1,34 @@
 {% extends "base.html" %}
-{% block title %}Restoration Intake — Request help{% endblock %}
+{% block title %}Alpine Restoration · 24/7 water, fire & mold restoration · Austin, TX{% endblock %}
+{% block meta %}<meta name="description" content="24/7 water, fire, smoke, and mold restoration in Austin, TX. Describe what happened in your own words. We read it immediately and dispatch the right crew.">{% endblock %}
+{% block chrome %}
+  <nav>
+    <span class="brand">Alpine Restoration</span>
+    <span class="tagline">Water · Fire · Mold</span>
+    <a class="phone" href="tel:+15125550148"><small>24/7</small>(512) 555-0148</a>
+  </nav>
+{% endblock %}
 {% block content %}
-<h1>Tell us what happened</h1>
-<p class="sub">Describe the problem in your own words — water, fire, smoke, mold, storm
-damage, anything. Our intake system reads it immediately and routes it to the right team.</p>
-
-<form method="post" action="/">
-  <textarea name="text" placeholder="e.g. Our basement flooded overnight after the storm — standing water everywhere, and I'm worried about mold. We're in Cedar Park."
-    >{{ text }}</textarea>
-  <button type="submit">Submit request</button>
-</form>
-
-{% if error %}
-<div class="card error">
-  <strong>We couldn't process that.</strong> {{ error }}
-  {% if error_request_id %}<br><small class="muted">reference: {{ error_request_id }}</small>{% endif %}
-</div>
-{% endif %}
+<p class="notice warn emergency">If anyone's in danger right now, <strong>call 911
+first.</strong> The property can wait. We'll take it from there once everyone's safe.</p>
 
 {% if result %}
 {% set type_label = 'pending review' if result.request_type == 'unknown'
                     else result.request_type.replace('_', ' ') %}
-<div class="card">
-  <h2 style="margin-top:0">Request received ✓</h2>
+<h1>We're on it</h1>
+<p class="sub">Your request is in. Hang on to the reference number. It's how we'll both
+find this request later.</p>
+<div class="card result-card" style="margin-top:0">
+  <p class="ref-line" style="margin-top:0">Your reference:
+  <code class="ref">{{ result.request_id }}</code></p>
   <dl>
-    <dt>reference</dt><dd><code>{{ result.request_id }}</code></dd>
     <dt>assessed as</dt><dd><span class="chip">{{ type_label }}</span></dd>
     <dt>confidence</dt><dd>{{ "%.2f"|format(result.confidence) }}</dd>
     <dt>status</dt>
     <dd>
       {% if result.escalate_to_human %}
       <span class="badge human">specialist review</span>
-      A coordinator will review this personally and follow up with you directly.
+      A coordinator is going to look at this one personally and follow up with you.
       {% else %}
       <span class="badge auto">queued for dispatch</span>
       Routed to our {{ type_label }} team.
@@ -45,8 +42,43 @@ damage, anything. Our intake system reads it immediately and routes it to the ri
     <p>{{ result.extras.customer_reply }}</p>
   </div>
   {% endif %}
-  <p class="muted" style="margin-bottom:0"><small>Keep your reference number handy —
-  it identifies this request from here on.</small></p>
+</div>
+<p style="margin-top:1.35rem"><a class="btn-line" href="/">Send another request</a></p>
+
+{% else %}
+<h1>Tell us what happened</h1>
+<p class="sub">Flooding, smoke damage, mold, whatever it is: write it the way you'd
+tell a neighbor. We read every message as soon as it comes in, any hour.</p>
+
+<form method="post" action="/">
+  <label class="intake-label" for="intake-text">Describe the situation</label>
+  <textarea id="intake-text" name="text" required minlength="10" maxlength="8000"
+    placeholder="e.g. Our basement flooded overnight after the storm, there's standing water everywhere, and I'm worried about mold. We're in Cedar Park."
+    >{{ text }}</textarea>
+  <p class="hint">Include where you are and how long it's been happening. It saves the
+  crew a callback.</p>
+  <button type="submit">Send request</button>
+</form>
+
+{% if error %}
+<div class="card error">
+  <strong>We couldn't process that.</strong> {{ error }}
+  {% if error_request_id %}<br><small class="muted">reference: {{ error_request_id }}</small>{% endif %}
 </div>
 {% endif %}
+
+<script>
+  // The pipeline takes a few seconds; hold the button so an anxious
+  // double-click can't file the same emergency twice.
+  document.querySelector("form").addEventListener("submit", (event) => {
+    const button = event.target.querySelector("button[type=submit]");
+    button.disabled = true;
+    button.textContent = "Sending…";
+  });
+</script>
+{% endif %}
 {% endblock %}
+{% block footer %}<span class="foot-brand">Alpine Restoration</span><span class="foot-sep">·</span>
+Austin, TX<span class="foot-sep">·</span>Licensed &amp; insured<span class="foot-sep">·</span>
+24/7 emergency response: <a href="tel:+15125550148">(512) 555-0148</a><span class="foot-sep">·</span>
+<a href="/admin">Staff sign-in</a>{% endblock %}
